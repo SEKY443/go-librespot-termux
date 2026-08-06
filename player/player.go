@@ -385,6 +385,19 @@ loop:
 						cmd.resp <- err
 						break
 					}
+
+					// EXPERIMENTAL: give the backend a moment to settle after
+					// the flush above before asking it to restart. Observed
+					// on at least one PulseAudio setup (Termux/Android, the
+					// OpenSL ES sink module): restarting immediately after a
+					// flush hangs waiting for the server's start
+					// confirmation, while the exact same flush-then-restart
+					// sequence with a natural human delay between the two
+					// steps (e.g. pause, then play) succeeds. If this turns
+					// out not to help, remove it rather than tuning the
+					// duration - it's a guess at a server-side timing
+					// sensitivity, not a real fix.
+					time.Sleep(300 * time.Millisecond)
 				}
 
 				// Drop no longer restarts the stream; (re)create the output
