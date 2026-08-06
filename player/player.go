@@ -254,6 +254,28 @@ func (p *Player) manageLoop() {
 	// init main source
 	source := NewSwitchingAudioSource(p.crossfadeSamples)
 
+	// ensureOutput creates a new output device if one isn't already open.
+	// Play and Seek only ever reach this loop once the daemon has confirmed a
+	// primary stream is set (see AppPlayer.play/seek), so out == nil at that
+	// point always means a previous output was discarded after a failure
+	// (closeOutput above), never "nothing to play yet" - safe to recreate
+	// unconditionally.
+	ensureOutput := func() error {
+		if out != nil {
+			return nil
+		}
+
+		var err error
+		out, err = p.newOutput(source, volume, device)
+		if err != nil {
+			return err
+		}
+
+		outErr = out.Error()
+		p.log.Debugf("created new output device")
+		return nil
+	}
+
 loop:
 	for {
 		select {
@@ -267,17 +289,9 @@ loop:
 					break
 				}
 
-				// create a new output device if needed
-				if out == nil {
-					var err error
-					out, err = p.newOutput(source, volume, device)
-					if err != nil {
-						cmd.resp <- err
-						break
-					}
-
-					outErr = out.Error()
-					p.log.Debugf("created new output device")
+				if err := ensureOutput(); err != nil {
+					cmd.resp <- err
+					break
 				}
 
 				// Flush the previous source before switching, otherwise the
@@ -313,18 +327,17 @@ loop:
 					p.ev <- Event{Type: EventTypePlay}
 				}
 			case playerCmdPlay:
-				if out != nil {
-					if err := out.Resume(); err != nil {
-						closeOutput()
-						cmd.resp <- err
-					} else {
-						paused = false
-						cmd.resp <- nil
-						p.ev <- Event{Type: EventTypeResume}
-					}
+				if err := ensureOutput(); err != nil {
+					cmd.resp <- err
+					break
+				}
+				if err := out.Resume(); err != nil {
+					closeOutput()
+					cmd.resp <- err
 				} else {
 					paused = false
 					cmd.resp <- nil
+					p.ev <- Event{Type: EventTypeResume}
 				}
 			case playerCmdPause:
 				if out != nil {
@@ -350,24 +363,36 @@ loop:
 				cmd.resp <- struct{}{}
 				p.ev <- Event{Type: EventTypeStop}
 			case playerCmdSeek:
+				// Update the source's position regardless of output state:
+				// previously this was skipped whenever out was nil, silently
+				// dropping the seek itself rather than just the audio.
+				if err := source.SetPositionMs(cmd.data.(int64)); err != nil {
+					cmd.resp <- err
+					break
+				}
+
 				if out != nil {
-					if err := source.SetPositionMs(cmd.data.(int64)); err != nil {
-						cmd.resp <- err
-					} else if err = out.Drop(); err != nil {
+					if err := out.Drop(); err != nil {
 						closeOutput()
 						cmd.resp <- err
-					} else {
-						// Drop no longer restarts the stream; resume unless paused.
-						if !paused {
-							if err = out.Resume(); err != nil {
-								closeOutput()
-							}
-						}
-						cmd.resp <- err
+						break
 					}
-				} else {
-					cmd.resp <- nil
 				}
+
+				// Drop no longer restarts the stream; (re)create the output
+				// and resume unless paused. This also covers out having been
+				// nil to begin with (e.g. discarded after an earlier
+				// failure): SetPositionMs above already updated where
+				// playback continues from.
+				var err error
+				if !paused {
+					if err = ensureOutput(); err == nil {
+						if err = out.Resume(); err != nil {
+							closeOutput()
+						}
+					}
+				}
+				cmd.resp <- err
 			case playerCmdPosition:
 				pos := source.PositionMs()
 				if out != nil {
