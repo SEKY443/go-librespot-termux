@@ -39,54 +39,38 @@
 
 ## Getting Started
 
-### Using prebuilt binary
+To run this on your Android device, you will need to set up a prooted Ubuntu environment inside Termux and route the audio through PulseAudio. 
 
-To get started you can download prebuilt binaries for
-the [latest release](https://github.com/devgianlu/go-librespot/releases/latest).
+### 1. Install and Update Termux
 
-Development prebuilt binaries are also available
-as [GitHub Actions artifacts](https://github.com/devgianlu/go-librespot/blob/249b8fee709e2d08fe9c39a16ad0fc4b737cb967/.github/workflows/release.yml#L62).
-
-### Using Docker
-
-A lightweight Docker image for go-librespot is available
-on the [GitHub Container Registry](https://github.com/devgianlu/go-librespot/pkgs/container/go-librespot).
-
-An example Docker Compose configuration for PulseAudio is available [here](/docker-compose.pulse.yml).
-
-### Using Brew
-
-You can also install go-librespot [using Brew](https://formulae.brew.sh/formula/go-librespot)
-on macOS and Linux (thanks @kriive):
+Download and install Termux on your Android device (using F-Droid is highly recommended to get the latest updates). Once opened, update and upgrade your package lists:
 
 ```shell
-brew install go-librespot
+pkg update && pkg upgrade
 ```
 
-### Building from source
+### 2. Configure PulseAudio
 
-To build from source the following prerequisites are necessary:
-
-- Go 1.25 or higher
-- Libraries: `libogg`, `libvorbis`, `flac`, `mpg123`, `libasound2`
-
-To install Go, download it from the [Go website](https://go.dev/dl/).
-
-To install the required libraries on Debian-based systems (Debian, Ubuntu, Raspbian), use:
+Install the PulseAudio package and start the daemon so your server can actually output sound:
 
 ```shell
-sudo apt-get install libogg-dev libvorbis-dev libflac-dev libmpg123-dev libasound2-dev
+pkg install pulseaudio
+pulseaudio --start
 ```
 
-Once prerequisites are installed you can clone the repository and run the daemon with:
+### 3. Set Up Ubuntu
+
+To ensure all the Go and C dependencies compile correctly, set up an Ubuntu environment inside Termux using proot-distro:
 
 ```shell
-go run ./cmd/daemon
+pkg install proot-distro
+proot-distro install ubuntu
+proot-distro login ubuntu
 ```
 
-Details about cross-compiling go-librespot are described [here](/CROSS_COMPILE.md) (thank you @felixstorm).
+# Still in progress
 
-## Configuration
+## Configuration (No changes)
 
 The default directory for configuration files is `~/.config/go-librespot`. On macOS devices, this is
 `~/Library/Application Support/go-librespot`. You can change this directory with the
