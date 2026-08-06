@@ -454,19 +454,6 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 					EndOfTrack: &connectpb.SleepTimer_EndOfTrack{},
 				},
 			}
-
-			// The player crossfades/gapless-continues into a prefetched
-			// secondary stream on its own once the primary hits EOF,
-			// entirely independent of daemon-level bookkeeping - reacting
-			// in the EventTypeNotPlaying handler is too late to stop that
-			// once it's armed. Tear down any already-scheduled prefetch (it
-			// may have run up to ~30s before track end, well before this
-			// command) and stop scheduling more, so there's nothing left
-			// for the player to fall through into and playback actually
-			// stops instead of gaplessly continuing into the next track.
-			p.prefetchTimer.Stop()
-			p.secondaryStream = nil
-			p.player.SetSecondaryStream(nil)
 		default:
 			// "clear" is Spotify's own cancel signal. Anything else we don't
 			// recognize is logged rather than silently treated as a cancel,
@@ -475,11 +462,6 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 				p.app.log.Warnf("unsupported set_sleep_timer timer_type payload: %s", req.RawCommand)
 			}
 			p.state.player.SleepTimer = nil
-
-			// Cancelling out of end_of_track mode (sleepAtEndOfTrack was
-			// already reset above): resume normal gapless behavior instead
-			// of leaving prefetching stopped for the rest of the session.
-			p.schedulePrefetchNext()
 		}
 
 		p.updateState(ctx)
