@@ -423,11 +423,28 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 
 		// Only "duration" is documented behavior we've observed; any other
 		// (or missing) timer_type - which is presumably how a client cancels
-		// an active timer - just leaves it stopped above.
+		// an active timer - just leaves it stopped above and the state
+		// cleared below.
+		//
+		// Setting the timer alone has no visible effect on its own: the
+		// Spotify app doesn't track this locally, it reads back whether (and
+		// when) a timer is active from PlayerState.SleepTimer, so that has
+		// to be kept in sync for the app to show anything at all.
 		if tt := req.Command.TimerType; tt != nil && tt.Type == "duration" && tt.DurationS > 0 {
-			p.sleepTimer.Reset(time.Duration(tt.DurationS) * time.Second)
+			duration := time.Duration(tt.DurationS) * time.Second
+			p.sleepTimer.Reset(duration)
+			p.state.player.SleepTimer = &connectpb.SleepTimer{
+				TimerType: &connectpb.SleepTimer_Timestamp_{
+					Timestamp: &connectpb.SleepTimer_Timestamp{
+						Timestamp: time.Now().Add(duration).UnixMilli(),
+					},
+				},
+			}
+		} else {
+			p.state.player.SleepTimer = nil
 		}
 
+		p.updateState(ctx)
 		return nil
 	default:
 		p.app.log.Warnf("unsupported player command %q payload: %s", req.Command.Endpoint, req.RawCommand)
@@ -878,6 +895,10 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRec
 		case <-p.prefetchTimer.C:
 			p.prefetchNext(ctx)
 		case <-p.sleepTimer.C:
+			// Cleared before pause(), whose own updateState call picks this
+			// up - so the app stops showing the timer as active in the same
+			// state push that reports playback paused.
+			p.state.player.SleepTimer = nil
 			if err := p.pause(ctx); err != nil {
 				p.app.log.WithError(err).Warn("failed pausing playback for sleep timer")
 			}

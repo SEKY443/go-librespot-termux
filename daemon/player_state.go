@@ -151,6 +151,7 @@ func (p *AppPlayer) initState() {
 				NeedsFullPlayerState:       false,
 				SupportsGzipPushes:         true,
 				SupportsSetOptionsCommand:  true,
+				SupportsRemoteSleepTimer:   true,
 				SupportsHifi:               nil, // TODO: nice to have?
 				ConnectCapabilities:        "",
 			},
