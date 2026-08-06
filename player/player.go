@@ -371,6 +371,14 @@ loop:
 				// pulseaudio (#292).
 				if data.drop {
 					_ = out.Drop()
+
+					// EXPERIMENTAL: same settle delay as the seek path (see
+					// its comment for the underlying reasoning) - a flush
+					// immediately followed by a restart hangs on at least
+					// one real PulseAudio setup, while the same sequence
+					// with a gap in between succeeds. This path does the
+					// exact same flush-then-restart on a track skip/change.
+					time.Sleep(300 * time.Millisecond)
 				}
 
 				// set source
