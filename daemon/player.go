@@ -441,12 +441,12 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 				},
 			}
 		} else {
-			if tt := req.Command.TimerType; tt != nil && tt.Type != "" {
-				// Not a cancel: some other timer_type we don't handle yet
-				// (e.g. "end of track" is a documented separate variant in
-				// the PlayerState.SleepTimer oneof - see EndOfTrack - that
-				// this doesn't implement). Log the raw payload rather than
-				// silently treating it as a cancel.
+			// "clear" is Spotify's own cancel signal. Anything else we don't
+			// recognize (e.g. "end of track" is a documented separate
+			// variant of the PlayerState.SleepTimer oneof - see EndOfTrack -
+			// that isn't implemented yet) is logged rather than silently
+			// treated as a cancel, so its actual wire shape can be captured.
+			if tt := req.Command.TimerType; tt != nil && tt.Type != "" && tt.Type != "clear" {
 				p.app.log.Warnf("unsupported set_sleep_timer timer_type payload: %s", req.RawCommand)
 			}
 			p.state.player.SleepTimer = nil
