@@ -405,6 +405,9 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 		p.addToQueue(ctx, req.Command.Track)
 		return nil
 	default:
+		if raw, err := json.Marshal(req.Command); err == nil {
+			p.app.log.Warnf("unsupported player command %q payload: %s", req.Command.Endpoint, raw)
+		}
 		return fmt.Errorf("unsupported player command: %s", req.Command.Endpoint)
 	}
 }
