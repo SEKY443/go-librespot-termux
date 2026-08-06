@@ -11,7 +11,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.0
 	github.com/gofrs/flock v0.13.0
 	github.com/grandcat/zeroconf v1.0.0
-	github.com/jfreymuth/pulse v0.1.2-0.20241102120944-4ffb35054b53
+	github.com/jfreymuth/pulse v0.1.2
 	github.com/knadh/koanf/parsers/yaml v1.1.0
 	github.com/knadh/koanf/providers/confmap v1.0.0
 	github.com/knadh/koanf/providers/file v1.2.0

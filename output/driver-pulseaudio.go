@@ -93,10 +93,17 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 	default:
 		return nil, fmt.Errorf("cannot play %d channels, pulse only supports mono and stereo", opts.ChannelCount)
 	}
-	volumeUpdates := make(chan proto.ChannelVolumes, 1)
+	// Deliberately not requesting pulse.PlaybackVolumeChanges here (external
+	// volume-mixer changes reflected back into Spotify): the library's event
+	// handler for it has a real race with Close() - it can observe the
+	// stream's sink-input already deleted server-side while p.Closed() still
+	// reports false, and unconditionally panics in that case, which crashes
+	// the whole process since it happens on a goroutine we don't control and
+	// can't recover(). Spotify-driven volume changes (SetVolume below) are
+	// unaffected; only picking up changes made through an external mixer is
+	// lost.
 	lplaybackopts := []pulse.PlaybackOption{
 		pulse.PlaybackSampleRate(out.sampleRate),
-		pulse.PlaybackVolumeChanges(volumeUpdates),
 		channelOpt,
 	}
 
@@ -128,21 +135,6 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 	cvol, _ := out.stream.Volume()
 	out.volume = cvol.Avg()
 	sendVolumeUpdate(opts.VolumeUpdate, float32(out.volume.Norm()))
-
-	// Listen for volume changes (through the volume mixer application, usually
-	// built into the desktop environment), and send them back to Spotify.
-	go func() {
-		for cvol := range volumeUpdates {
-			volume := cvol.Avg()
-
-			out.volumeLock.Lock()
-			if volume != out.volume {
-				sendVolumeUpdate(opts.VolumeUpdate, float32(volume.Norm()))
-				out.volume = volume
-			}
-			out.volumeLock.Unlock()
-		}
-	}()
 
 	return out, nil
 }
