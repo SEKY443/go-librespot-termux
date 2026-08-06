@@ -193,7 +193,7 @@ func loadCLIConfig(cfg *cliConfig) error {
 		"device_type": "computer",
 		"bitrate":     160,
 
-		"audio_backend":            "alsa",
+		"audio_backend":            "pulseaudio",
 		"audio_device":             "default",
 		"audio_output_pipe_format": "s16le",
 		"mixer_control_name":       "Master",

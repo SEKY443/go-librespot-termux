@@ -228,7 +228,7 @@ log_disable_timestamp: false # Whether to disable timestamps in log output
 device_id: '' # Spotify device ID (auto-generated)
 device_name: '' # Spotify device name
 device_type: computer # Spotify device type (icon)
-audio_backend: alsa # Audio backend to use (alsa, pipe, pulseaudio)
+audio_backend: pulseaudio # Audio backend to use (alsa, pipe, pulseaudio)
 audio_backend_runtime_socket: '' # Audio backends' runtime socket to use, if backend is pulseaudio
 audio_backend_call_timeout_ms: 0 # How long a single pulseaudio server call may take before failing, in ms. 0 uses the default (10000ms); raise it on slow-but-working setups (e.g. some Android/Termux PulseAudio bridges)
 audio_device: default # ALSA audio device to use for playback

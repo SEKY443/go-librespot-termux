@@ -73,7 +73,7 @@
             "pulseaudio",
             "pipe"
           ],
-          "default": "alsa"
+          "default": "pulseaudio"
         },
         "audio_backend_runtime_socket": {
            "type": "string",
