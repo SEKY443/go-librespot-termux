@@ -1,12 +1,12 @@
 **This fork is for my personal Android Termux home audio server, some of the changes may cause problems on other platforms.**
 **This is my first Go project and a huge thanks to Claude — I'm still working on it and trying to fix issues as I find them.**
 
-<h1 align="center">go-librespot</h1>
+<h1 align="center">go-librespot-termux</h1>
 
 <p align="center">
-  <em>Yet another open-source Spotify Connect compatible client, written in Go.</em>
+  <em>A go-librespot fork tuned for running a Spotify Connect speaker on Android, via Termux.</em>
   <br>
-  go-librespot gives you the freedom to have a Spotify Connect device wherever you want.
+  Turn an old phone into an always-on Spotify Connect device on your home network.
 </p>
 
 <p align="center">
@@ -96,7 +96,7 @@ pkg install pulseaudio openssh termux-api
 Rather than starting things manually every time, use [`termux-autostart.sh`](/termux-autostart.sh): it acquires the wake lock, starts PulseAudio listening on `127.0.0.1:4713` (so the Ubuntu proot below can reach it — it can't reach Termux's own Unix sockets), starts sshd, and drops you into the Ubuntu proot automatically. Download it into your Termux home and wire it into every new session:
 
 ```shell
-curl -o ~/termux-autostart.sh https://raw.githubusercontent.com/SEKY443/go-librespot/master/termux-autostart.sh
+curl -o ~/termux-autostart.sh https://raw.githubusercontent.com/SEKY443/go-librespot-termux/master/termux-autostart.sh
 chmod +x ~/termux-autostart.sh
 echo 'source ~/termux-autostart.sh' >> ~/.bashrc
 ```
@@ -117,8 +117,8 @@ Inside the Ubuntu proot, install a Go toolchain and this project's build depende
 
 ```shell
 apt update && apt install -y golang libogg-dev libvorbis-dev libflac-dev libmpg123-dev libasound2-dev pkg-config git
-git clone https://github.com/SEKY443/go-librespot.git
-cd go-librespot
+git clone https://github.com/SEKY443/go-librespot-termux.git
+cd go-librespot-termux
 go run ./cmd/daemon
 ```
 
