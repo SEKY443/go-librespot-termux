@@ -37,6 +37,7 @@ type cliConfig struct {
 
 	AudioBackend              string `koanf:"audio_backend"`
 	AudioBackendRuntimeSocket string `koanf:"audio_backend_runtime_socket"`
+	AudioBackendCallTimeoutMs int    `koanf:"audio_backend_call_timeout_ms"`
 	AudioDevice               string `koanf:"audio_device"`
 	MixerDevice               string `koanf:"mixer_device"`
 	MixerControlName          string `koanf:"mixer_control_name"`
@@ -103,6 +104,7 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 
 		AudioBackend:              c.AudioBackend,
 		AudioBackendRuntimeSocket: c.AudioBackendRuntimeSocket,
+		AudioBackendCallTimeoutMs: c.AudioBackendCallTimeoutMs,
 		AudioDevice:               c.AudioDevice,
 		MixerDevice:               c.MixerDevice,
 		MixerControlName:          c.MixerControlName,

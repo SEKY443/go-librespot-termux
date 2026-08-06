@@ -138,6 +138,13 @@ type Options struct {
 	//
 	// This feature is support only for the pulseaudio backend.
 	AudioBackendRuntimeSocket string
+	// AudioBackendCallTimeout bounds how long a single call to the backend's
+	// server may take before it's treated as failed. Zero uses the backend's
+	// own default.
+	//
+	// This is only supported on the pulseaudio backend. See
+	// output.NewOutputOptions.CallTimeout for why this needs to be tunable.
+	AudioBackendCallTimeout time.Duration
 	// AudioDevice specifies the audio device name.
 	//
 	// This feature is support only for the alsa and pulseaudio backend.
@@ -205,6 +212,7 @@ func NewPlayer(opts *Options) (*Player, error) {
 				ChannelCount:     Channels,
 				Device:           device,
 				RuntimeSocket:    opts.AudioBackendRuntimeSocket,
+				CallTimeout:      opts.AudioBackendCallTimeout,
 				Mixer:            opts.MixerDevice,
 				Control:          opts.MixerControlName,
 				InitialVolume:    volume,

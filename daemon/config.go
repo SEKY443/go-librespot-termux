@@ -9,6 +9,10 @@ type Config struct {
 
 	AudioBackend              string
 	AudioBackendRuntimeSocket string
+	// AudioBackendCallTimeoutMs bounds how long a single call to the audio
+	// backend's server may take, in milliseconds. Zero uses the backend's own
+	// default. Only supported on the pulseaudio backend.
+	AudioBackendCallTimeoutMs int
 	AudioDevice               string
 	MixerDevice               string
 	MixerControlName          string

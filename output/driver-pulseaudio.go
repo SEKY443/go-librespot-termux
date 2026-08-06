@@ -11,28 +11,18 @@ import (
 	"github.com/jfreymuth/pulse/proto"
 )
 
-// pulseCallTimeout bounds how long we wait for a PulseAudio server round
-// trip. The jfreymuth/pulse client performs these as plain blocking calls
-// with no timeout or cancellation of its own: if the server never replies
-// (observed in practice: a sink stuck "suspended", e.g. via PulseAudio's
-// macOS CoreAudio bridge, so the *proto.Started event Start() waits for is
-// never sent), the call blocks forever. Since these methods run on the
-// player's single command loop, an unbounded hang here would freeze the
-// entire daemon, not just audio - including replying to Spotify. A caller
-// that gets a timeout here must treat the output as broken and discard it
-// rather than reuse it: the library call's goroutine is abandoned in place
-// (leaked) rather than left to mutate the stream's state after we've moved
-// on, but that also means e.g. an abandoned Start() leaves the stream
-// thinking it's already running, silently no-oping any future Start() call.
-const pulseCallTimeout = 10 * time.Second
+// defaultPulseCallTimeout is used when NewOutputOptions.CallTimeout is zero.
+// See NewOutputOptions.CallTimeout's doc comment for why this needs to be
+// bounded at all, and why the right bound varies by environment.
+const defaultPulseCallTimeout = 10 * time.Second
 
 // withPulseTimeout runs fn, which must perform exactly one PulseAudio client
-// call, and bounds it to pulseCallTimeout, propagating fn's own error if it
-// completes in time. See pulseCallTimeout's doc comment. done is buffered so
-// a fn that only finishes after we've already timed out doesn't block trying
-// to send its result - it's still a leaked goroutine, just not also a stuck
-// one.
-func withPulseTimeout(fn func() error) error {
+// call, and bounds it to timeout, propagating fn's own error if it completes
+// in time. See NewOutputOptions.CallTimeout's doc comment. done is buffered
+// so a fn that only finishes after we've already timed out doesn't block
+// trying to send its result - it's still a leaked goroutine, just not also a
+// stuck one.
+func withPulseTimeout(timeout time.Duration, fn func() error) error {
 	done := make(chan error, 1)
 	go func() {
 		done <- fn()
@@ -41,7 +31,7 @@ func withPulseTimeout(fn func() error) error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(pulseCallTimeout):
+	case <-time.After(timeout):
 		return fmt.Errorf("timed out waiting for pulseaudio server")
 	}
 }
@@ -57,6 +47,7 @@ type pulseAudioOutput struct {
 	volumeLock           sync.Mutex
 	externalVolumeUpdate chan float32
 	err                  chan error
+	callTimeout          time.Duration
 }
 
 func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
@@ -74,6 +65,10 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 	if err != nil {
 		return nil, err
 	}
+	callTimeout := opts.CallTimeout
+	if callTimeout <= 0 {
+		callTimeout = defaultPulseCallTimeout
+	}
 	out := &pulseAudioOutput{
 		log:                  opts.Log,
 		sampleRate:           opts.SampleRate,
@@ -81,6 +76,7 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 		client:               client,
 		externalVolumeUpdate: opts.VolumeUpdate,
 		err:                  make(chan error, 2),
+		callTimeout:          callTimeout,
 	}
 
 	// Create a new playback.
@@ -166,7 +162,7 @@ func (out *pulseAudioOutput) Pause() error {
 
 		// To really stop playback *now*, we have to also flush everything
 		// that's in the buffer.
-		err := withPulseTimeout(func() error {
+		err := withPulseTimeout(out.callTimeout, func() error {
 			return out.client.RawRequest(&proto.FlushPlaybackStream{
 				StreamIndex: out.stream.StreamIndex(),
 			}, nil)
@@ -185,7 +181,7 @@ func (out *pulseAudioOutput) Resume() error {
 	// Start the stream. This will start reading samples from out.reader and
 	// push it to PulseAudio. It will do nothing if the playback is already
 	// started.
-	err := withPulseTimeout(func() error {
+	err := withPulseTimeout(out.callTimeout, func() error {
 		out.stream.Start()
 		return nil
 	})
@@ -201,7 +197,7 @@ func (out *pulseAudioOutput) Drop() error {
 		// resumes once the new source is set. Restarting raced with the
 		// source switch and clipped the start of the track (#292).
 		out.stream.Stop()
-		err := withPulseTimeout(func() error {
+		err := withPulseTimeout(out.callTimeout, func() error {
 			return out.client.RawRequest(&proto.FlushPlaybackStream{
 				StreamIndex: out.stream.StreamIndex(),
 			}, nil)
@@ -234,7 +230,7 @@ func (out *pulseAudioOutput) SetVolume(vol float32) {
 	out.volumeLock.Unlock()
 
 	cvol := proto.ChannelVolumes{volume}
-	err := withPulseTimeout(func() error {
+	err := withPulseTimeout(out.callTimeout, func() error {
 		return out.stream.SetVolume(cvol)
 	})
 	if err != nil {

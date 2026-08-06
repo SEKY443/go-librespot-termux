@@ -2,6 +2,7 @@ package output
 
 import (
 	"fmt"
+	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 )
@@ -113,6 +114,19 @@ type NewOutputOptions struct {
 	//
 	// This is only supported on the pipe backend.
 	OutputPipeFormat string
+
+	// CallTimeout bounds how long a single call to the backend's server is
+	// allowed to take before it's treated as failed. Zero uses the backend's
+	// own default.
+	//
+	// This is only supported on the pulseaudio backend, whose client library
+	// performs blocking server round trips with no timeout of its own: a
+	// server that never replies (e.g. a sink that never leaves "suspended")
+	// would otherwise hang forever. How long is reasonable is
+	// environment-dependent - a broken local sink should fail fast, while a
+	// slow-but-working setup (observed: PulseAudio over a bridge on Android)
+	// may genuinely need longer than the default to complete a single call.
+	CallTimeout time.Duration
 }
 
 func NewOutput(options *NewOutputOptions) (Output, error) {

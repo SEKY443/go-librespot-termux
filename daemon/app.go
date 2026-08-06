@@ -258,6 +258,7 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 
 		AudioBackend:              app.cfg.AudioBackend,
 		AudioBackendRuntimeSocket: app.cfg.AudioBackendRuntimeSocket,
+		AudioBackendCallTimeout:   time.Duration(app.cfg.AudioBackendCallTimeoutMs) * time.Millisecond,
 		AudioDevice:               app.cfg.AudioDevice,
 		MixerDevice:               app.cfg.MixerDevice,
 		MixerControlName:          app.cfg.MixerControlName,

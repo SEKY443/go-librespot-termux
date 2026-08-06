@@ -80,6 +80,11 @@
            "description": "The audio backend runtime socket, useful only with pulseaudio as a backend",
            "default": ""
         },
+        "audio_backend_call_timeout_ms": {
+           "type": "integer",
+           "description": "How long a single call to the audio backend's server may take before it's treated as failed, in milliseconds. Zero uses the backend's own default (10000ms). Useful only with pulseaudio as a backend, where a slow-but-working setup (e.g. PulseAudio over a bridge on some Android/Termux setups) may need more time than the default to complete a single call.",
+           "default": 0
+        },
         "audio_device": {
           "type": "string",
           "description": "Which audio device should be used for playback, leave empty for default",
