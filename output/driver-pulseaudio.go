@@ -112,7 +112,18 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 		// dropping back to idle before ever confirming playback started -
 		// exactly the hang Resume() was timing out on. 100ms keeps every
 		// chunk comfortably under the pool size regardless of sample rate.
+		//
+		// PlaybackLatency alone sets AdjustLatency: true, letting the server
+		// grow the target back up over the stream's lifetime if it decides
+		// that's needed for stability - which would silently reintroduce
+		// this exact bug well after the stream started, on a later Resume()
+		// (e.g. after a track skip) rather than the first one. The
+		// following raw option pins AdjustLatency back to false, keeping
+		// the requested size fixed for the life of the stream.
 		pulse.PlaybackLatency(0.1),
+		pulse.PlaybackRawOption(func(req *proto.CreatePlaybackStream) {
+			req.AdjustLatency = false
+		}),
 	}
 
 	if opts.Device != "" {
