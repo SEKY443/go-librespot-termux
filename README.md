@@ -13,7 +13,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/devgianlu/go-librespot/releases/latest"><img alt="GitHub release" src="https://img.shields.io/github/release/devgianlu/go-librespot.svg"></a>
   <img alt="GitHub branch check runs" src="https://img.shields.io/github/check-runs/devgianlu/go-librespot/master">
   <a href="https://github.com/devgianlu/go-librespot/blob/master/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/devgianlu/go-librespot"></a>
 </p>
