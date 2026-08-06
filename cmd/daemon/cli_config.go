@@ -45,6 +45,7 @@ type cliConfig struct {
 	AudioPeriodCount          int    `koanf:"audio_period_count"`
 	AudioOutputPipe           string `koanf:"audio_output_pipe"`
 	AudioOutputPipeFormat     string `koanf:"audio_output_pipe_format"`
+	OptimisticPlaybackReplies bool   `koanf:"optimistic_playback_replies"`
 
 	Bitrate                       int      `koanf:"bitrate"`
 	VolumeSteps                   uint32   `koanf:"volume_steps"`
@@ -112,6 +113,7 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 		AudioPeriodCount:          c.AudioPeriodCount,
 		AudioOutputPipe:           c.AudioOutputPipe,
 		AudioOutputPipeFormat:     c.AudioOutputPipeFormat,
+		OptimisticPlaybackReplies: c.OptimisticPlaybackReplies,
 
 		Bitrate:                   c.Bitrate,
 		VolumeSteps:               c.VolumeSteps,

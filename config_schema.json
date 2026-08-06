@@ -125,6 +125,11 @@
           ],
           "default": "s16le"
         },
+        "optimistic_playback_replies": {
+          "type": "boolean",
+          "description": "Reply to play/pause/seek commands as soon as they're accepted instead of waiting for the audio backend to confirm them. Trades reply accuracy for latency: on a backend whose calls can be slow (see audio_backend_call_timeout_ms), Spotify's dealer may otherwise decide the device is unresponsive and disconnect while still waiting on a slow call. Off by default; worth enabling specifically when a slow backend is causing disconnects.",
+          "default": false
+        },
         "server": {
           "type": "object",
           "properties": {

@@ -20,6 +20,11 @@ type Config struct {
 	AudioPeriodCount          int
 	AudioOutputPipe           string
 	AudioOutputPipeFormat     string
+	// OptimisticPlaybackReplies, when true, replies to a play/pause/seek
+	// command as soon as it's accepted instead of waiting for the output
+	// backend to confirm it. See player.Options.OptimisticPlaybackReplies
+	// for the full trade-off; off by default.
+	OptimisticPlaybackReplies bool
 
 	Bitrate                   int
 	VolumeSteps               uint32

@@ -70,6 +70,11 @@ type Player struct {
 	volumeSteps uint32
 
 	startedPlaying time.Time
+
+	// optimisticPlaybackReplies controls when manageLoop replies to a
+	// Play/Pause/Seek/Set command relative to the output actually confirming
+	// the change - see Options.OptimisticPlaybackReplies.
+	optimisticPlaybackReplies bool
 }
 
 type playerCmdType int
@@ -186,6 +191,28 @@ type Options struct {
 	//
 	// This is only supported on the pipe backend.
 	AudioOutputPipeFormat string
+
+	// OptimisticPlaybackReplies changes when Play/Pause/Seek/Set commands
+	// reply relative to the output backend actually confirming the change:
+	//
+	//   - false (default): waits for the output call (e.g. Resume) to finish
+	//     before replying, so the caller - including, for a command that
+	//     came from Spotify's dealer, Spotify itself - sees an accurate
+	//     result, at the cost of taking as long as the backend does.
+	//   - true: replies with success immediately and performs the output
+	//     call afterward. A failure is only logged and the output discarded,
+	//     to be recreated on the next play/seek attempt - never reported
+	//     back to the original caller. This trades reply accuracy for
+	//     latency: on a backend whose calls can be slow (see e.g. the
+	//     pulseaudio driver's CallTimeout), Spotify's dealer can decide the
+	//     device is unresponsive and force a reconnect while we're still
+	//     waiting on a slow call - even though playback would have kept
+	//     working locally regardless of that connection.
+	//
+	// Off by default because it makes the reply's success less trustworthy;
+	// worth enabling specifically on a setup where a slow backend is causing
+	// disconnects.
+	OptimisticPlaybackReplies bool
 }
 
 func NewPlayer(opts *Options) (*Player, error) {
@@ -203,6 +230,7 @@ func NewPlayer(opts *Options) (*Player, error) {
 		normalisationPregain:      opts.NormalisationPregain,
 		countryCode:               opts.CountryCode,
 		defaultAudioDevice:        opts.AudioDevice,
+		optimisticPlaybackReplies: opts.OptimisticPlaybackReplies,
 		newOutput: func(reader librespot.Float32Reader, volume float32, device string) (output.Output, error) {
 			return output.NewOutput(&output.NewOutputOptions{
 				Log:              opts.Log,
@@ -284,6 +312,42 @@ func (p *Player) manageLoop() {
 		return nil
 	}
 
+	// runOutputOp runs op (a possibly slow output call: Resume, Pause) and
+	// replies to cmd depending on p.optimisticPlaybackReplies:
+	//
+	//   - false (default): waits for op to finish, replying with its error.
+	//     A failure also discards the output (closeOutput) so a broken
+	//     instance isn't reused.
+	//   - true: replies with success immediately, then runs op. A failure is
+	//     only logged and the output discarded, to be recreated on the next
+	//     play/seek attempt (see ensureOutput) - never reported back to the
+	//     original caller.
+	//
+	// onSuccess runs once the reply has been decided either way - e.g. for
+	// updating paused/startedPlaying or emitting an Event - before op in the
+	// optimistic path, since op hasn't necessarily finished by the time the
+	// reply already went out. See Options.OptimisticPlaybackReplies's doc
+	// comment for why this trade-off exists.
+	runOutputOp := func(cmd playerCmd, op func() error, onSuccess func()) {
+		if p.optimisticPlaybackReplies {
+			cmd.resp <- nil
+			onSuccess()
+			if err := op(); err != nil {
+				closeOutput()
+				p.log.WithError(err).Warnf("output failed after optimistic reply")
+			}
+			return
+		}
+
+		if err := op(); err != nil {
+			closeOutput()
+			cmd.resp <- err
+			return
+		}
+		cmd.resp <- nil
+		onSuccess()
+	}
+
 loop:
 	for {
 		select {
@@ -311,56 +375,40 @@ loop:
 
 				// set source
 				source.SetPrimary(data.source)
-				if data.paused {
-					if err := out.Pause(); err != nil {
-						closeOutput()
-						cmd.resp <- err
-						break
-					}
-				} else {
-					if err := out.Resume(); err != nil {
-						closeOutput()
-						cmd.resp <- err
-						break
-					}
-				}
-				paused = data.paused
 
-				p.startedPlaying = time.Now()
-				cmd.resp <- nil
-
-				if data.paused {
-					p.ev <- Event{Type: EventTypePause}
-				} else {
-					p.ev <- Event{Type: EventTypePlay}
-				}
+				runOutputOp(cmd, func() error {
+					if data.paused {
+						return out.Pause()
+					}
+					return out.Resume()
+				}, func() {
+					paused = data.paused
+					p.startedPlaying = time.Now()
+					if data.paused {
+						p.ev <- Event{Type: EventTypePause}
+					} else {
+						p.ev <- Event{Type: EventTypePlay}
+					}
+				})
 			case playerCmdPlay:
 				if err := ensureOutput(); err != nil {
 					cmd.resp <- err
 					break
 				}
-				if err := out.Resume(); err != nil {
-					closeOutput()
-					cmd.resp <- err
-				} else {
+				runOutputOp(cmd, out.Resume, func() {
 					paused = false
-					cmd.resp <- nil
 					p.ev <- Event{Type: EventTypeResume}
-				}
+				})
 			case playerCmdPause:
-				if out != nil {
-					if err := out.Pause(); err != nil {
-						closeOutput()
-						cmd.resp <- err
-					} else {
-						paused = true
-						cmd.resp <- nil
-						p.ev <- Event{Type: EventTypePause}
-					}
-				} else {
+				if out == nil {
 					paused = true
 					cmd.resp <- nil
+					break
 				}
+				runOutputOp(cmd, out.Pause, func() {
+					paused = true
+					p.ev <- Event{Type: EventTypePause}
+				})
 			case playerCmdStop:
 				if out != nil {
 					closeOutput()
@@ -405,15 +453,17 @@ loop:
 				// nil to begin with (e.g. discarded after an earlier
 				// failure): SetPositionMs above already updated where
 				// playback continues from.
-				var err error
-				if !paused {
-					if err = ensureOutput(); err == nil {
-						if err = out.Resume(); err != nil {
-							closeOutput()
-						}
-					}
+				if paused {
+					cmd.resp <- nil
+					break
 				}
-				cmd.resp <- err
+
+				if err := ensureOutput(); err != nil {
+					cmd.resp <- err
+					break
+				}
+
+				runOutputOp(cmd, out.Resume, func() {})
 			case playerCmdPosition:
 				pos := source.PositionMs()
 				if out != nil {
