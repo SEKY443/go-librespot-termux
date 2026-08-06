@@ -209,6 +209,28 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 			},
 		})
 
+		// A set_sleep_timer("end_of_track") is exactly this moment: the
+		// current track has finished. Stop here instead of advancing,
+		// mirroring the "no next track" state below (advanceNext sets the
+		// same three fields when it can't find anything to play).
+		if p.sleepAtEndOfTrack {
+			p.sleepAtEndOfTrack = false
+			p.state.player.SleepTimer = nil
+			p.state.player.IsPlaying = false
+			p.state.player.IsPaused = false
+			p.state.player.IsBuffering = false
+			p.updateState(ctx)
+
+			p.app.server.Emit(&ApiEvent{
+				Type: ApiEventTypeStopped,
+				Data: ApiEventDataStopped{
+					PlayOrigin: p.state.playOrigin(),
+				},
+			})
+			p.emitMprisUpdate(mpris.Stopped)
+			return
+		}
+
 		hasNextTrack, err := p.advanceNext(context.TODO(), false, false)
 		if err != nil {
 			p.app.log.WithError(err).Error("failed advancing to next track")
