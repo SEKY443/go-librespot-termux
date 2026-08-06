@@ -74,7 +74,10 @@ func (p *AppPlayer) prefetchNext(ctx context.Context) {
 }
 
 func (p *AppPlayer) schedulePrefetchNext() {
-	if p.state.player.IsPaused || p.primaryStream == nil {
+	if p.state.player.IsPaused || p.primaryStream == nil || p.sleepAtEndOfTrack {
+		// sleepAtEndOfTrack: a prefetched secondary lets the player
+		// gapless-continue into it once the primary hits EOF, entirely on
+		// its own - the opposite of what an end-of-track sleep timer wants.
 		p.prefetchTimer.Stop()
 		return
 	}
