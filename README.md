@@ -1,4 +1,6 @@
 **This fork is for my personal Android Termux home audio server, some of the changes may cause problem on other platform.**
+**This is my first go project and a huge thx to Claude. I'm still working on it and trying to fix those issues.**
+
 <h1 align="center">go-librespot</h1>
 
 <p align="center">
