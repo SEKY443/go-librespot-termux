@@ -101,6 +101,18 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 	lplaybackopts := []pulse.PlaybackOption{
 		pulse.PlaybackSampleRate(out.sampleRate),
 		channelOpt,
+		// Without an explicit target, the server picks its own buffer
+		// target (observed: 2000ms), and the client library fills that
+		// whole target in a single Send() on Start(). At 44.1kHz/stereo/
+		// float32 that's ~705KB in one chunk - far past PulseAudio's
+		// default 64KB memory pool block size, logged server-side as
+		// "Memory block too large for pool". On at least one real setup
+		// (Termux/Android, the OpenSL ES sink module) that oversized first
+		// chunk was immediately followed by an underrun and the sink
+		// dropping back to idle before ever confirming playback started -
+		// exactly the hang Resume() was timing out on. 100ms keeps every
+		// chunk comfortably under the pool size regardless of sample rate.
+		pulse.PlaybackLatency(0.1),
 	}
 
 	if opts.Device != "" {
