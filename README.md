@@ -1,5 +1,5 @@
-**This fork is for my personal Android Termux home audio server, some of the changes may cause problem on other platform.**
-**This is my first go project and a huge thx to Claude. I'm still working on it and trying to fix those issues.**
+**This fork is for my personal Android Termux home audio server, some of the changes may cause problems on other platforms.**
+**This is my first Go project and a huge thanks to Claude — I'm still working on it and trying to fix issues as I find them.**
 
 <h1 align="center">go-librespot</h1>
 
@@ -17,7 +17,8 @@
 
 <p align="center">
   <a href="#features">Features</a> •
-  <a href="#getting-started">Getting Started</a> •
+  <a href="#whats-different-in-this-fork">What's Different</a> •
+  <a href="#getting-started-android--termux">Getting Started</a> •
   <a href="#configuration">Configuration</a> •
   <a href="#development">Development</a>
 </p>
@@ -36,31 +37,75 @@
 - 🌐 **REST API + WebSocket events** — control and monitor playback programmatically.
 - 🖥️ **MPRIS integration** — control playback over D-Bus / standard Linux media keys.
 - 🪶 **Lightweight & portable** — a single Go binary, ideal for Raspberry Pi and other embedded devices.
+- 😴 **Sleep timer** — pause after a duration or at the end of the current track, synced back to the Spotify app's own UI.
 
-## Getting Started
+## What's Different in This Fork
 
-To run this on your Android device, you will need to set up a prooted Ubuntu environment inside Termux and route the audio through PulseAudio. 
+Everything below was found and fixed while running this specifically as an Android/Termux home audio server. Most of it is general reliability work that isn't Android-specific, but a few PulseAudio fixes were driven by problems only observed on Termux's PulseAudio setup.
 
-### 1. Install and Update Termux
+### Reliability / connection fixes
 
-Download and install Termux on your Android device (using F-Droid is highly recommended to get the latest updates). Once opened, update and upgrade your package lists:
+- Dealer/accesspoint reconnect could hang for up to 15 minutes after any disconnect, freezing all remote control — now bounded to 30s, and no longer blocks other operations (like the ping/pong keepalive) while reconnecting.
+- A slow command (e.g. loading a new track) could stall the dealer's read loop and starve pong replies, itself triggering a disconnect — request handling is now decoupled from the read loop.
+- Seeking near the end of a track could crash the whole track load — a seek estimate landing on/past the last page is now treated as a valid (if imprecise) seek instead of a hard failure.
+- Fixed a data race on a shared audio-decryption buffer (found with `-race`), affecting concurrent prefetch.
+- A truncated audio-key packet was silently accepted as a valid (wrong) key, causing confusing failures far downstream — now rejected clearly at the source.
+
+### PulseAudio reliability (Android/Termux)
+
+- Fixed a hard crash (`panic: pulseaudio: no such entity`) caused by a race condition in the PulseAudio client library, triggered by a broken upstream dependency commit — downgraded to a stable release and disabled the one feature that exercised the buggy code path.
+- PulseAudio calls could hang the entire daemon forever if the server stopped responding — all blocking calls are now bounded by a configurable timeout (`audio_backend_call_timeout_ms`).
+- A broken output device would silently stop producing audio while Spotify's UI still said "Playing" — timed-out/broken outputs are now discarded and automatically recreated on the next play/seek attempt.
+- Root-caused the most common PulseAudio resume failures: an unset buffer target let the server default to ~2000ms, which exceeds PulseAudio's internal memory pool block size and causes an instant underrun. Now pinned to a small, fixed 100ms target.
+- Added a short settle delay between flushing and restarting a PulseAudio stream — needed on real hardware where an immediate restart right after a flush would hang.
+- Default audio backend changed to `pulseaudio` (was `alsa`).
+
+### New features
+
+- Implemented `set_sleep_timer` — both the duration and "end of current track" modes were previously entirely unimplemented.
+- Sleep timer state is now reflected back via `PlayerState.SleepTimer`, so the Spotify app's own UI actually shows it, and advertises the `SupportsRemoteSleepTimer` capability.
+- Added `optimistic_playback_replies` (opt-in, off by default): reply to play/pause/seek commands immediately instead of waiting for the audio backend to confirm them.
+- Unsupported dealer commands now log their full raw payload, so a new/unimplemented command's actual shape can be discovered instead of guessed at.
+
+### Known trade-off
+
+- The `end_of_track` sleep timer mode can leave the Spotify app showing/controlling the *next* track instead of the one that just ended, if that next track was already gapless-prefetched. A fix for this was tried and reverted, since it exposed a separate crash bug in the PulseAudio client library (reported upstream, not fixed there yet).
+
+## Getting Started (Android / Termux)
+
+This section covers running go-librespot as a home audio server on an Android phone via Termux, using a prooted Ubuntu environment for the build/runtime and PulseAudio (routed over the TCP loopback) for audio output. For every other platform, see [upstream's README](https://github.com/devgianlu/go-librespot#getting-started) instead — nothing below is specific to this fork's fixes.
+
+### 1. Install and update Termux
+
+Install Termux on your Android device (using [F-Droid](https://f-droid.org/packages/com.termux/) is highly recommended to get the latest updates, not the Play Store version). Once opened, update and upgrade your package lists:
 
 ```shell
 pkg update && pkg upgrade
 ```
 
-### 2. Configure PulseAudio
+### 2. Set up PulseAudio, sshd, and auto-start
 
-Install the PulseAudio package and start the daemon so your server can actually output sound:
+Install PulseAudio and OpenSSH:
 
 ```shell
-pkg install pulseaudio
-pulseaudio --start
+pkg install pulseaudio openssh termux-api
 ```
 
-### 3. Set Up Ubuntu
+`termux-api` provides `termux-wake-lock`, used below to stop Android from suspending PulseAudio in the background — install the companion [Termux:API](https://f-droid.org/packages/com.termux.api/) app too, or the wake lock silently won't do anything.
 
-To ensure all the Go and C dependencies compile correctly, set up an Ubuntu environment inside Termux using proot-distro:
+Rather than starting things manually every time, use [`termux-autostart.sh`](/termux-autostart.sh): it acquires the wake lock, starts PulseAudio listening on `127.0.0.1:4713` (so the Ubuntu proot below can reach it — it can't reach Termux's own Unix sockets), starts sshd, and drops you into the Ubuntu proot automatically. Download it into your Termux home and wire it into every new session:
+
+```shell
+curl -o ~/termux-autostart.sh https://raw.githubusercontent.com/SEKY443/go-librespot/master/termux-autostart.sh
+chmod +x ~/termux-autostart.sh
+echo 'source ~/termux-autostart.sh' >> ~/.bashrc
+```
+
+Open a new Termux session (or `source ~/termux-autostart.sh` in this one) to run it now.
+
+### 3. Set up Ubuntu
+
+To ensure all the Go and C dependencies compile correctly, set up an Ubuntu environment inside Termux using proot-distro (`termux-autostart.sh` above will drop you into this automatically on future sessions):
 
 ```shell
 pkg install proot-distro
@@ -68,187 +113,32 @@ proot-distro install ubuntu
 proot-distro login ubuntu
 ```
 
-# Still in progress
-
-## Configuration (No changes)
-
-The default directory for configuration files is `~/.config/go-librespot`. On macOS devices, this is
-`~/Library/Application Support/go-librespot`. You can change this directory with the
-`-config_dir` flag. The configuration directory contains:
-
-- `config.yml`: The main configuration (does not exist by default)
-- `state.json`: The player state and credentials
-- `lockfile`: A lockfile to prevent running multiple instances on the same configuration
-
-The full configuration schema is available [here](/config_schema.json), only the main options are detailed below.
-
-### Zeroconf Mode and mDNS Backend Selection
-
-Zeroconf mode enables mDNS auto discovery, allowing Spotify clients inside the same network to connect to go-librespot. This is also known as Spotify Connect.
-
-**Backend selection:**  
-go-librespot supports two different backends for mDNS service registration:
-
-- **builtin**: (default) Uses the built-in mDNS responder provided by go-librespot itself.  
-- **avahi**: Uses the system's avahi-daemon (via D-Bus) for mDNS service registration.
-
-You can configure which backend to use via the `zeroconf_backend` setting in your configuration file:
-
-```yaml
-zeroconf_backend: avahi   # Options: "builtin" (default), "avahi"
-```
-
-Or via the command line:
+Inside the Ubuntu proot, install a Go toolchain and this project's build dependencies, then clone and run it:
 
 ```shell
-go-librespot -c zeroconf_backend=avahi
+apt update && apt install -y golang libogg-dev libvorbis-dev libflac-dev libmpg123-dev libasound2-dev pkg-config git
+git clone https://github.com/SEKY443/go-librespot.git
+cd go-librespot
+go run ./cmd/daemon
 ```
 
-#### Which backend should I use?
+## Configuration
 
-- Use **avahi** if you want to integrate with an existing Avahi daemon, e.g. on embedded systems, to avoid port conflicts, or to centralize mDNS advertisements with system service management (e.g., using `systemd`).
-    - Compatible with Avahi 0.6.x and later (tested with 0.7 and 0.8).
-- Use **builtin** if you do **not** have Avahi running and want go-librespot to manage its own mDNS advertisements (no extra dependencies required).
+Configuration in this fork works exactly like upstream — see [upstream's README](https://github.com/devgianlu/go-librespot#configuration) and [`config_schema.json`](/config_schema.json) for the full list of options. The only difference is the default `audio_backend`, changed to `pulseaudio` (see [What's Different](#whats-different-in-this-fork) above).
 
-#### Example minimal Zeroconf configuration
+This is the `config.yml` (in `~/.config/go-librespot/`, inside the Ubuntu proot) this fork is actually running in production:
 
 ```yaml
-zeroconf_enabled: true # Whether to keep the device discoverable at all times, even if authenticated via other means
-zeroconf_port: 0       # The port to use for Zeroconf, 0 for random
-zeroconf_backend: avahi
+device_name: "<YOUR DEVICE NAME>"
+device_type: "speaker"
+audio_backend: "pulseaudio"
+zeroconf_enabled: false
+bitrate: 320
+ignore_last_volume: false
+initial_volume: 50
 credentials:
-  type: zeroconf
-  zeroconf:
-    persist_credentials: false # Whether to persist zeroconf user credentials even after disconnecting
+  type: interactive
 ```
-
-If `persist_credentials` is `true`, after connecting to the device for the first time credentials will be stored locally
-and you can switch to interactive mode without having to authenticate manually.
-
-If `zeroconf_interfaces_to_advertise` is provided, you can limit interfaces that will be advertised. For example, if you
-have Docker installed on your host, you may want to disable advertising to its bridge interface, or you may want to
-disable interfaces that will not be reachable.
-
-### Interactive mode
-
-This mode allows you to associate your account with the device and make it discoverable even outside the network. It
-requires some manual steps to complete the authentication:
-
-1. Configure interactive mode
-
-    ```yaml
-    zeroconf_enabled: false # Whether to keep the device discoverable at all times
-    credentials:
-      type: interactive
-    ```
-
-2. Start the daemon to begin the authentication flow
-3. Open the authorization link in your browser and wait to be redirected
-4. If go-librespot is running on the same device as your browser, authentication should complete successfully
-5. (optional) If go-librespot is running on another device, you'll need to copy the URL from your browser and call it
-   from the device, for example:
-
-   ```bash
-   curl http://127.0.0.1:36842/login?code=xxxxxxxx
-   ```
-
-### API server
-
-Optionally, an API server can be started to control and monitor the player. To enable this feature, add the following to
-your configuration:
-
-```yaml
-server:
-  enabled: true
-  address: localhost # Which address to bind to
-  port: 3678 # The server port
-  allow_origin: '' # Value for the Access-Control-Allow-Origin header
-  cert_file: '' # Path to certificate file for TLS
-  key_file: '' # Path to key file for TLS
-  image_size: 'default' # Album art image size (default, small, large, xlarge)
-```
-
-For detailed API documentation see [here](/API.md).
-
-### Audio cache
-
-Downloaded audio files can be cached on disk so that replaying a track does not download it again from the CDN. Only the
-raw, still-encrypted files are stored: a cached file is useless without a valid Spotify account, since the audio key is
-retrieved again on every playback. The cache is disabled by default; once enabled it applies a 1 GB limit, after which the
-least-recently-used files are evicted.
-
-```yaml
-cache:
-  enabled: false # Whether to cache downloaded audio files (default: false)
-  dir: '' # Directory for cached files (default: the XDG cache directory, e.g. $XDG_CACHE_HOME/go-librespot or $HOME/.cache/go-librespot)
-  size_limit: '1GB' # Maximum total cache size before evicting least-recently-used files ('0' for unlimited)
-```
-
-### Volume synchronization
-
-Various configurations for volume control are available:
-
-1. **No external volume without mixer**: Spotify volume is controlled independently of the device volume, output samples
-   are multiplied with the volume
-2. **No external volume with mixer**: Spotify volume is synchronized with the device volume and vice versa, output
-   samples
-   are not volume dependant, Spotify volume changes are applied to the ALSA mixer and vice versa
-3. **External volume without mixer**: Spotify volume is not synchronized with the device volume, output samples are not
-   volume dependant
-4. **External volume with mixer**: Device volume is synchronized with Spotify volume, output samples are not volume
-   dependant, volume changes are not applied to the ALSA mixer
-
-### Audio normalization
-
-go-librespot implements audio normalization according to Spotify's standards, which targets **-14 dB LUFS** (Loudness
-Units relative to Full Scale) based on the **ITU-R BS.1770** standard.
-[Source](https://support.spotify.com/us/artists/article/loudness-normalization/)
-
-Normalization can be configured with the following options:
-
-```yaml
-normalisation_disabled: false # Whether to disable normalization (default: false)
-normalisation_use_album_gain: false # Whether to use album gain instead of track gain (default: false)
-normalisation_pregain: 0 # Pregain in dB to apply before normalization (default: 0)
-```
-
-The pregain is applied on Spotify's -14 dB LUFS target. Spotify suggests the following presets for pregain:
-
-- Loud: -11 dB LUFS, apply a pregain of +3 dB
-- Normal: -14 dB LUFS, apply a pregain of 0 dB
-- Quiet: -19 dB LUFS, apply a pregain of -5 dB
-
-### Additional configuration
-
-The following options are also available:
-
-```yaml
-log_level: info # Log level configuration (trace, debug, info, warn, error)
-log_disable_timestamp: false # Whether to disable timestamps in log output
-device_id: '' # Spotify device ID (auto-generated)
-device_name: '' # Spotify device name
-device_type: computer # Spotify device type (icon)
-audio_backend: pulseaudio # Audio backend to use (alsa, pipe, pulseaudio)
-audio_backend_runtime_socket: '' # Audio backends' runtime socket to use, if backend is pulseaudio
-audio_backend_call_timeout_ms: 0 # How long a single pulseaudio server call may take before failing, in ms. 0 uses the default (10000ms); raise it on slow-but-working setups (e.g. some Android/Termux PulseAudio bridges)
-audio_device: default # ALSA audio device to use for playback
-mixer_device: '' # ALSA mixer device for volume synchronization 
-mixer_control_name: Master # ALSA mixer control name for volume synchronization
-audio_buffer_time: 500000 # Audio buffer time in microseconds, ALSA only
-audio_period_count: 4 # Number of periods to request, ALSA only
-audio_output_pipe: '' # Path to a named pipe for audio output
-audio_output_pipe_format: s16le # Audio output pipe format (s16le, s32le, f32le)
-optimistic_playback_replies: false # Reply to play/pause/seek immediately instead of waiting for the audio backend to confirm; enable if a slow backend (see audio_backend_call_timeout_ms) is causing Spotify to disconnect while waiting for a reply
-bitrate: 160 # Playback bitrate (96, 160, 320)
-crossfade_duration: 0 # Crossfade duration between tracks in milliseconds (0 to disable)
-volume_steps: 100 # Volume steps count
-initial_volume: 100 # Initial volume in steps (not applied to the mixer device)
-ignore_last_volume: false # Whether to ignore the last saved volume and always use initial_volume
-external_volume: false # Whether volume is controlled externally 
-disable_autoplay: false # Whether autoplay of more songs should be disabled
-```
-
-Make sure to check [here](/config_schema.json) for the full list of options.
 
 ## Development
 
