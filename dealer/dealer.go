@@ -18,6 +18,13 @@ import (
 const (
 	pingInterval = 30 * time.Second
 	timeout      = 10 * time.Second
+
+	// reconnectMaxElapsedTime bounds how long recvLoop keeps retrying a dropped
+	// connection before giving up. The default backoff budget is 15 minutes;
+	// during that whole window every remote-control command (including a seek)
+	// would silently go nowhere. Giving up promptly instead hands the player
+	// back to the daemon, which rebuilds the session from scratch.
+	reconnectMaxElapsedTime = 30 * time.Second
 )
 
 var ErrDealerClosed = errors.New("dealer closed")
@@ -37,6 +44,15 @@ type Dealer struct {
 	recvLoopOnce sync.Once
 	lastPong     time.Time
 	lastPongLock sync.Mutex
+
+	// dispatchCh hands parsed "message"/"request" frames from recvLoop to
+	// dispatchLoop. Handling a request blocks until the consumer replies (up to
+	// the daemon's 30s command timeout, e.g. while loading a new track), so it
+	// must not run on recvLoop's own goroutine: that would stall reading the
+	// next frame off the wire, including the pong replies the ping/pong
+	// watchdog depends on. Buffered so a short burst of frames doesn't stall
+	// recvLoop either; a single dispatcher goroutine preserves arrival order.
+	dispatchCh chan *RawMessage
 
 	// connMu protects conn pointer state.
 	connMu sync.RWMutex
@@ -60,21 +76,22 @@ func NewDealer(log librespot.Logger, client *http.Client, dealerAddr librespot.G
 		addr:             dealerAddr,
 		accessToken:      accessToken,
 		done:             make(chan struct{}),
+		dispatchCh:       make(chan *RawMessage, 8),
 		requestReceivers: map[string]requestReceiver{},
 	}
 }
 
 func (d *Dealer) Connect(ctx context.Context) error {
-	d.connMu.Lock()
-	defer d.connMu.Unlock()
-
 	select {
 	case <-d.done:
 		return ErrDealerClosed
 	default:
 	}
 
-	if d.conn != nil {
+	d.connMu.RLock()
+	alreadyConnected := d.conn != nil
+	d.connMu.RUnlock()
+	if alreadyConnected {
 		d.log.Debugf("dealer connection already opened")
 		return nil
 	}
@@ -82,6 +99,13 @@ func (d *Dealer) Connect(ctx context.Context) error {
 	return d.connect(ctx)
 }
 
+// connect dials a fresh dealer connection and installs it as the current one.
+// connMu is only held for the brief pointer swap, not for the dial itself:
+// callers may retry this in a loop for a while on a bad network, and holding
+// a write lock for that whole time would block every reader of connMu
+// (writeConn/closeConn, used by the ping/pong watchdog and by anything
+// sending a reply) for just as long, leaving a stuck reconnect undetectable
+// until it finally gives up.
 func (d *Dealer) connect(ctx context.Context) error {
 	accessToken, err := d.accessToken(ctx, false)
 	if err != nil {
@@ -89,26 +113,29 @@ func (d *Dealer) connect(ctx context.Context) error {
 	}
 
 	addr := d.addr(ctx)
-	if conn, _, err := websocket.Dial(ctx, fmt.Sprintf("wss://%s/?access_token=%s", addr, accessToken), &websocket.DialOptions{
+	conn, _, err := websocket.Dial(ctx, fmt.Sprintf("wss://%s/?access_token=%s", addr, accessToken), &websocket.DialOptions{
 		HTTPClient: d.client,
 		HTTPHeader: http.Header{
 			"User-Agent": []string{librespot.UserAgent()},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		return err
-	} else {
-		if d.conn != nil {
-			_ = d.conn.Close(websocket.StatusServiceRestart, "")
-		}
-
-		// we assign to d.conn after because if Dial fails we'll have a nil d.conn which we don't want
-		d.conn = conn
-		d.log.Debug(fmt.Sprintf("connected to %s", addr))
 	}
 
-	// remove the read limit
-	d.conn.SetReadLimit(math.MaxUint32)
+	// remove the read limit before publishing the connection
+	conn.SetReadLimit(math.MaxUint32)
 
+	d.connMu.Lock()
+	oldConn := d.conn
+	d.conn = conn
+	d.connMu.Unlock()
+
+	if oldConn != nil {
+		_ = oldConn.Close(websocket.StatusServiceRestart, "")
+	}
+
+	d.log.Debug(fmt.Sprintf("connected to %s", addr))
 	return nil
 }
 
@@ -124,6 +151,7 @@ func (d *Dealer) startReceiving() {
 		d.log.Tracef("starting dealer recv loop")
 		d.resetPongDeadline()
 		go d.pingTicker()
+		go d.dispatchLoop()
 		go d.recvLoop()
 	})
 }
@@ -207,12 +235,15 @@ loop:
 			}
 
 			switch message.Type {
-			case "message":
-				d.handleMessage(&message)
-				break
-			case "request":
-				d.handleRequest(&message)
-				break
+			case "message", "request":
+				// Handed off rather than handled here: processing a request
+				// blocks until the daemon replies, which must not stall this
+				// loop's next read (see dispatchCh's doc comment).
+				select {
+				case d.dispatchCh <- &message:
+				case <-d.done:
+					break loop
+				}
 			case "ping":
 				// we never receive ping messages
 				break
@@ -235,16 +266,14 @@ loop:
 	select {
 	case <-d.done:
 	default:
-		d.connMu.Lock()
-		if err := backoff.Retry(d.reconnect, backoff.NewExponentialBackOff()); err != nil {
+		b := backoff.NewExponentialBackOff()
+		b.MaxElapsedTime = reconnectMaxElapsedTime
+		if err := backoff.Retry(d.reconnect, b); err != nil {
 			d.log.WithError(err).Errorf("failed reconnecting dealer")
-			d.connMu.Unlock()
 
 			// something went very wrong, give up
 			d.Close()
 		} else {
-			d.connMu.Unlock()
-
 			// reconnection was successful, do not close receivers
 			return
 		}

@@ -120,6 +120,31 @@ func handleTransferEncoding(headers map[string]string, data []byte) ([]byte, err
 	return data, nil
 }
 
+// dispatchLoop drains dispatchCh and hands each frame to handleMessage or
+// handleRequest, off recvLoop's own goroutine. See dispatchCh's doc comment
+// for why: handleRequest blocks until the consumer replies, and running that
+// wait on the same goroutine that reads the websocket would stall reading the
+// next frame — including pong replies — for just as long.
+func (d *Dealer) dispatchLoop() {
+	for {
+		select {
+		case <-d.done:
+			return
+		case message, ok := <-d.dispatchCh:
+			if !ok {
+				return
+			}
+
+			switch message.Type {
+			case "message":
+				d.handleMessage(message)
+			case "request":
+				d.handleRequest(message)
+			}
+		}
+	}
+}
+
 func (d *Dealer) handleMessage(rawMsg *RawMessage) {
 	//goland:noinspection GoImportUsedAsName
 	log := d.log.WithField("uri", rawMsg.Uri)

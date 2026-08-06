@@ -28,6 +28,14 @@ import (
 
 const pongAckInterval = 120 * time.Second
 
+// reconnectMaxElapsedTime bounds how long recvLoop keeps retrying a dropped
+// accesspoint connection before giving up. The default backoff budget is 15
+// minutes, held under connMu the whole time (see reconnect below), which
+// would leave every audio-key/Mercury request blocked for just as long.
+// Giving up promptly instead hands the player back to the daemon, which
+// rebuilds the session from scratch.
+const reconnectMaxElapsedTime = 30 * time.Second
+
 var ErrAccesspointClosed = errors.New("accesspoint closed")
 
 type AccesspointLoginError struct {
@@ -362,7 +370,9 @@ loop:
 	case <-ap.done:
 	default:
 		ap.connMu.Lock()
-		if err := backoff.Retry(ap.reconnect, backoff.NewExponentialBackOff()); err != nil {
+		b := backoff.NewExponentialBackOff()
+		b.MaxElapsedTime = reconnectMaxElapsedTime
+		if err := backoff.Retry(ap.reconnect, b); err != nil {
 			ap.log.WithError(err).Errorf("failed reconnecting accesspoint")
 			ap.connMu.Unlock()
 
