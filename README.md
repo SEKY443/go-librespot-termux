@@ -6,8 +6,10 @@
   <em>A go-librespot fork tuned for running a Spotify Connect speaker on Android, via Termux.</em>
   <br>
   Turn an old phone into an always-on Spotify Connect device on your home network.
-  **This fork is for my personal Android Termux home audio server, some of the changes may cause problems on other platforms.**
-  **This is my first Go project and a huge thanks to Claude — I'm still working on it and trying to fix issues as I find them.**
+  <br>
+  This fork is for my personal Android Termux home audio server, some of the changes may cause problems on other platforms.
+  <br>
+  This is my first Go project and a huge thanks to Claude — I'm still working on it and trying to fix issues as I find them.
 </p>
 
 <p align="center">
