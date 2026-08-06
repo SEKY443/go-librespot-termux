@@ -228,22 +228,6 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 			if err := p.pause(ctx); err != nil {
 				p.app.log.WithError(err).Warn("failed pausing playback for sleep timer")
 			}
-
-			// WORKAROUND for a jfreymuth/pulse v0.1.2 bug (reported
-			// upstream): PlaybackStream.run() accumulates its internal
-			// "requested" byte count across the EndOfData break at end of
-			// stream without ever resetting it, then adds the next Start()
-			// call's fresh request on top of that stale leftover - on a
-			// later resume this can exceed the pre-allocated buffer and
-			// panic with a slice-bounds crash. Reaching end of track with
-			// nothing queued next (exactly this path, since the prefetch
-			// clearing above guarantees no secondary stream to gapless-
-			// continue into) is precisely the condition that leaves
-			// "requested" non-zero when the stream goes idle. Forcing the
-			// output closed here means the next resume creates a brand new
-			// stream (and thus a fresh run() goroutine with a zeroed
-			// counter) instead of reusing the one left in a bad state.
-			p.player.Stop()
 			return
 		}
 
