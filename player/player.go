@@ -231,6 +231,17 @@ func (p *Player) manageLoop() {
 	var out output.Output
 	outErr := make(<-chan error)
 
+	// closeOutput discards the current output device. Any output method
+	// failure - including a bounded-timeout error from a wedged backend, see
+	// e.g. the pulseaudio driver - must not be followed by reusing the same
+	// device: some backends leave internal state behind that makes a retried
+	// call silently no-op instead of actually failing or succeeding.
+	closeOutput := func() {
+		_ = out.Close()
+		out = nil
+		outErr = make(<-chan error)
+	}
+
 	// initial volume is 1
 	volume := float32(1)
 
@@ -280,11 +291,13 @@ loop:
 				source.SetPrimary(data.source)
 				if data.paused {
 					if err := out.Pause(); err != nil {
+						closeOutput()
 						cmd.resp <- err
 						break
 					}
 				} else {
 					if err := out.Resume(); err != nil {
+						closeOutput()
 						cmd.resp <- err
 						break
 					}
@@ -302,6 +315,7 @@ loop:
 			case playerCmdPlay:
 				if out != nil {
 					if err := out.Resume(); err != nil {
+						closeOutput()
 						cmd.resp <- err
 					} else {
 						paused = false
@@ -315,6 +329,7 @@ loop:
 			case playerCmdPause:
 				if out != nil {
 					if err := out.Pause(); err != nil {
+						closeOutput()
 						cmd.resp <- err
 					} else {
 						paused = true
@@ -327,9 +342,7 @@ loop:
 				}
 			case playerCmdStop:
 				if out != nil {
-					_ = out.Close()
-					out = nil
-					outErr = make(<-chan error)
+					closeOutput()
 
 					p.log.Tracef("closed output device because of stop command")
 				}
@@ -341,11 +354,14 @@ loop:
 					if err := source.SetPositionMs(cmd.data.(int64)); err != nil {
 						cmd.resp <- err
 					} else if err = out.Drop(); err != nil {
+						closeOutput()
 						cmd.resp <- err
 					} else {
 						// Drop no longer restarts the stream; resume unless paused.
 						if !paused {
-							err = out.Resume()
+							if err = out.Resume(); err != nil {
+								closeOutput()
+							}
 						}
 						cmd.resp <- err
 					}
@@ -389,9 +405,7 @@ loop:
 				// output is constructed, so two live outputs would corrupt the
 				// stream. A sub-second gap from the discarded buffer is expected.
 				_ = out.Drop()
-				_ = out.Close()
-				out = nil
-				outErr = make(<-chan error)
+				closeOutput()
 
 				newOut, err := p.newOutput(source, volume, device)
 				if err != nil {
@@ -411,9 +425,7 @@ loop:
 					err = out.Resume()
 				}
 				if err != nil {
-					_ = out.Close()
-					out = nil
-					outErr = make(<-chan error)
+					closeOutput()
 					cmd.resp <- err
 					break
 				}
@@ -431,9 +443,7 @@ loop:
 			}
 
 			// the current output device has exited, clean it up
-			_ = out.Close()
-			out = nil
-			outErr = make(<-chan error)
+			closeOutput()
 
 			p.log.Tracef("cleared closed output device")
 

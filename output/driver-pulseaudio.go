@@ -4,11 +4,47 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/jfreymuth/pulse"
 	"github.com/jfreymuth/pulse/proto"
 )
+
+// pulseCallTimeout bounds how long we wait for a PulseAudio server round
+// trip. The jfreymuth/pulse client performs these as plain blocking calls
+// with no timeout or cancellation of its own: if the server never replies
+// (observed in practice: a sink stuck "suspended", e.g. via PulseAudio's
+// macOS CoreAudio bridge, so the *proto.Started event Start() waits for is
+// never sent), the call blocks forever. Since these methods run on the
+// player's single command loop, an unbounded hang here would freeze the
+// entire daemon, not just audio - including replying to Spotify. A caller
+// that gets a timeout here must treat the output as broken and discard it
+// rather than reuse it: the library call's goroutine is abandoned in place
+// (leaked) rather than left to mutate the stream's state after we've moved
+// on, but that also means e.g. an abandoned Start() leaves the stream
+// thinking it's already running, silently no-oping any future Start() call.
+const pulseCallTimeout = 10 * time.Second
+
+// withPulseTimeout runs fn, which must perform exactly one PulseAudio client
+// call, and bounds it to pulseCallTimeout, propagating fn's own error if it
+// completes in time. See pulseCallTimeout's doc comment. done is buffered so
+// a fn that only finishes after we've already timed out doesn't block trying
+// to send its result - it's still a leaked goroutine, just not also a stuck
+// one.
+func withPulseTimeout(fn func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- fn()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(pulseCallTimeout):
+		return fmt.Errorf("timed out waiting for pulseaudio server")
+	}
+}
 
 type pulseAudioOutput struct {
 	log librespot.Logger
@@ -138,11 +174,13 @@ func (out *pulseAudioOutput) Pause() error {
 
 		// To really stop playback *now*, we have to also flush everything
 		// that's in the buffer.
-		err := out.client.RawRequest(&proto.FlushPlaybackStream{
-			StreamIndex: out.stream.StreamIndex(),
-		}, nil)
+		err := withPulseTimeout(func() error {
+			return out.client.RawRequest(&proto.FlushPlaybackStream{
+				StreamIndex: out.stream.StreamIndex(),
+			}, nil)
+		})
 		if err != nil {
-			return fmt.Errorf("Pause: could not flush playback: %e", err)
+			return fmt.Errorf("Pause: could not flush playback: %w", err)
 		}
 	} else {
 		// Nothing to do: we're already paused.
@@ -155,7 +193,13 @@ func (out *pulseAudioOutput) Resume() error {
 	// Start the stream. This will start reading samples from out.reader and
 	// push it to PulseAudio. It will do nothing if the playback is already
 	// started.
-	out.stream.Start()
+	err := withPulseTimeout(func() error {
+		out.stream.Start()
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("Resume: could not start playback: %w", err)
+	}
 	return nil
 }
 
@@ -165,11 +209,13 @@ func (out *pulseAudioOutput) Drop() error {
 		// resumes once the new source is set. Restarting raced with the
 		// source switch and clipped the start of the track (#292).
 		out.stream.Stop()
-		err := out.client.RawRequest(&proto.FlushPlaybackStream{
-			StreamIndex: out.stream.StreamIndex(),
-		}, nil)
+		err := withPulseTimeout(func() error {
+			return out.client.RawRequest(&proto.FlushPlaybackStream{
+				StreamIndex: out.stream.StreamIndex(),
+			}, nil)
+		})
 		if err != nil {
-			return fmt.Errorf("Drop: could not flush playback: %e", err)
+			return fmt.Errorf("Drop: could not flush playback: %w", err)
 		}
 	} else {
 		// Already stopped, e.g. flushed in Pause().
@@ -196,7 +242,9 @@ func (out *pulseAudioOutput) SetVolume(vol float32) {
 	out.volumeLock.Unlock()
 
 	cvol := proto.ChannelVolumes{volume}
-	err := out.stream.SetVolume(cvol)
+	err := withPulseTimeout(func() error {
+		return out.stream.SetVolume(cvol)
+	})
 	if err != nil {
 		out.log.WithError(err).Warn("failed to set volume")
 	}
