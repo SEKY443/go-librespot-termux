@@ -69,9 +69,20 @@ Everything below was found and fixed while running this specifically as an Andro
 - Added `optimistic_playback_replies` (opt-in, off by default): reply to play/pause/seek commands immediately instead of waiting for the audio backend to confirm them.
 - Unsupported dealer commands now log their full raw payload, so a new/unimplemented command's actual shape can be discovered instead of guessed at.
 
+### Patched dependency
+
+- **`jfreymuth/pulse` is vendored and patched** in [`third_party/pulse`](/third_party/pulse), pointed at via a `replace` directive in `go.mod`. Its playback goroutine never resets its internal "bytes still owed to PulseAudio" counter when a read ends early — including on the completely ordinary end-of-stream — so the next `Start()` stacks a fresh request on top of the stale leftover. Once that total exceeds the pre-allocated buffer, it panics and takes the whole daemon down:
+
+  ```
+  panic: runtime error: slice bounds out of range [:73416] with capacity 70560
+    github.com/jfreymuth/pulse.(*PlaybackStream).run() playback.go:104
+  ```
+
+  Observed in the wild after ~28 hours of uptime, triggered by hitting a restricted/unplayable track. The patch is two `requested = 0` resets; it's reported upstream and should be dropped once fixed there.
+
 ### Known trade-off
 
-- The `end_of_track` sleep timer mode can leave the Spotify app showing/controlling the *next* track instead of the one that just ended, if that next track was already gapless-prefetched. A fix for this was tried and reverted, since it exposed a separate crash bug in the PulseAudio client library (reported upstream, not fixed there yet).
+- The `end_of_track` sleep timer mode can leave the Spotify app showing/controlling the *next* track instead of the one that just ended, if that next track was already gapless-prefetched. A fix for this was tried and reverted, since it exposed the PulseAudio library crash described above — which is now patched, so this is worth revisiting.
 
 ## Getting Started (Android / Termux)
 
