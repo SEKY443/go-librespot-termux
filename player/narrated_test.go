@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/player"
@@ -121,6 +122,54 @@ func TestNarratedWaitsForPendingIntro(t *testing.T) {
 	go func() { ch <- lead }()
 
 	got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, true, ch, main, false, nil))
+	if len(got) != 100 {
+		t.Fatalf("got %d samples, want 100 (40 intro + 60 track)", len(got))
+	}
+}
+
+// EnsureReady is meant to be called before the source ever reaches the
+// output layer, precisely so a still-synthesizing intro's wait happens
+// there rather than inside the output's own first Read call (see its doc
+// comment for why that matters for the pulseaudio backend specifically).
+func TestNarratedEnsureReadyWaitsOutPendingIntro(t *testing.T) {
+	lead := emitting(t, 40, 0.25)
+	main := emitting(t, 60, 0.75)
+
+	ch := make(chan librespot.AudioSource, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		time.Sleep(20 * time.Millisecond) // stand in for synthesis still in flight
+		ch <- lead
+	}()
+	<-started
+
+	s := player.NewNarratedSource(&librespot.NullLogger{}, true, ch, main, false, nil)
+	s.EnsureReady() // blocks until the send above happens
+
+	// With EnsureReady already having resolved the intro, the very first
+	// Read must return immediately - nothing left to wait on. Its samples
+	// still count towards the total below, same as any other Read.
+	buf := make([]float32, 64)
+	type readResult struct {
+		n   int
+		err error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		n, err := s.Read(buf)
+		done <- readResult{n, err}
+	}()
+
+	var first []float32
+	select {
+	case r := <-done:
+		first = append(first, buf[:r.n]...)
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("Read blocked after EnsureReady already resolved the intro")
+	}
+
+	got := append(first, drainSource(t, s)...)
 	if len(got) != 100 {
 		t.Fatalf("got %d samples, want 100 (40 intro + 60 track)", len(got))
 	}

@@ -480,6 +480,12 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 		source = p.narrate(metadata, spotId.Uri(), source, introPrefix)
 	}
 
+	// A pending intro's synthesis must be resolved before source reaches the
+	// output layer, not by it: see NarratedSource.EnsureReady.
+	if r, ok := source.(interface{ EnsureReady() }); ok {
+		r.EnsureReady()
+	}
+
 	if err := p.player.SetPrimaryStream(source, paused, drop); err != nil {
 		return fmt.Errorf("failed setting stream for %s: %w", spotId, err)
 	}
