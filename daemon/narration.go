@@ -129,18 +129,39 @@ func (p *AppPlayer) narrationFor(ctx context.Context, metadata map[string]string
 // when the track has none.
 //
 // This runs at prefetch time as well as at load time: the player promotes the
-// prefetched source the moment the previous one ends, so a bare track there
-// would be heard for as long as the synthesis takes.
-func (p *AppPlayer) narrate(ctx context.Context, metadata map[string]string, uri string,
+// prefetched source the moment the previous one ends. It can also run inline
+// during a manual skip, ahead of prefetch. Either way it runs on the player's
+// single event loop, which also owns replying to the command that triggered
+// it (see AppPlayer.Run) - so unlike narrationFor itself, this must never
+// block on synthesis: intro and outro are each handed to a goroutine and
+// only actually awaited by NarratedSource.Read, once playback reaches the
+// point each is actually needed. Synthesis runs against p.ctx rather than a
+// context scoped to the current command, which would otherwise cancel the
+// goroutine the moment this function returns without waiting for it.
+func (p *AppPlayer) narrate(metadata map[string]string, uri string,
 	source librespot.AudioSource, introPrefix string) librespot.AudioSource {
-	intro := p.narrationFor(ctx, metadata, uri, introPrefix)
-	outro := p.narrationFor(ctx, metadata, uri, narrationOutroPrefix)
+	hasIntro := len(metadata[introPrefix+".ssml"]) > 0
+	hasOutro := len(metadata[narrationOutroPrefix+".ssml"]) > 0
 
-	if intro == nil && outro == nil {
+	if !hasIntro && !hasOutro {
 		return source
 	}
 
-	return player.NewNarratedSource(p.app.log, intro, source, outro)
+	var introCh <-chan librespot.AudioSource
+	if hasIntro {
+		ch := make(chan librespot.AudioSource, 1)
+		go func() { ch <- p.narrationFor(p.ctx, metadata, uri, introPrefix) }()
+		introCh = ch
+	}
+
+	var outroCh <-chan librespot.AudioSource
+	if hasOutro {
+		ch := make(chan librespot.AudioSource, 1)
+		go func() { ch <- p.narrationFor(p.ctx, metadata, uri, narrationOutroPrefix) }()
+		outroCh = ch
+	}
+
+	return player.NewNarratedSource(p.app.log, hasIntro, introCh, source, hasOutro, outroCh)
 }
 
 func narrationVoice(metadata map[string]string, prefix string) narrationpb.ResolveRequest_TtsVoice {

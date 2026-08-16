@@ -69,12 +69,12 @@ func (p *AppPlayer) prefetchNext(ctx context.Context) {
 		return
 	}
 
-	// Narration is prefetched with the track. The player promotes this source
-	// the instant the current one ends, so if it were the bare track the music
-	// would be heard for however long the synthesis takes before the load
-	// replaces it. Reaching a prefetched track always means arriving in turn,
-	// hence the introduction rather than the jump line.
-	p.secondarySource = p.narrate(ctx, nextTrackMetadata, nextId.Uri(),
+	// Narration is prefetched with the track, giving synthesis - kicked off
+	// here, awaited later by NarratedSource.Read - a head start of however
+	// long is left of the current track before this one is promoted.
+	// Reaching a prefetched track always means arriving in turn, hence the
+	// introduction rather than the jump line.
+	p.secondarySource = p.narrate(nextTrackMetadata, nextId.Uri(),
 		p.secondaryStream.Source, narrationIntroPrefix)
 
 	p.player.SetSecondaryStream(p.secondarySource)
@@ -477,7 +477,7 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 		// transition it has made rather than as a new track.
 		source = prefetchedSource
 	default:
-		source = p.narrate(ctx, metadata, spotId.Uri(), source, introPrefix)
+		source = p.narrate(metadata, spotId.Uri(), source, introPrefix)
 	}
 
 	if err := p.player.SetPrimaryStream(source, paused, drop); err != nil {
