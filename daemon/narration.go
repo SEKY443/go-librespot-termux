@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
@@ -130,11 +131,26 @@ func (p *AppPlayer) narrationFor(ctx context.Context, metadata map[string]string
 //
 // This runs at prefetch time as well as at load time: the player promotes the
 // prefetched source the moment the previous one ends, so a bare track there
-// would be heard for as long as the synthesis takes.
+// would be heard for as long as the synthesis takes. It can also run inline
+// during a manual skip, ahead of prefetch, blocking the player's single
+// event loop - including its reply to the skip command - for as long as
+// synthesis takes. intro and outro are independent TTS requests, so they run
+// concurrently to keep that worst case to one narrationTimeout instead of two.
 func (p *AppPlayer) narrate(ctx context.Context, metadata map[string]string, uri string,
 	source librespot.AudioSource, introPrefix string) librespot.AudioSource {
-	intro := p.narrationFor(ctx, metadata, uri, introPrefix)
-	outro := p.narrationFor(ctx, metadata, uri, narrationOutroPrefix)
+	var intro, outro librespot.AudioSource
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		intro = p.narrationFor(ctx, metadata, uri, introPrefix)
+	}()
+	go func() {
+		defer wg.Done()
+		outro = p.narrationFor(ctx, metadata, uri, narrationOutroPrefix)
+	}()
+	wg.Wait()
 
 	if intro == nil && outro == nil {
 		return source
