@@ -82,7 +82,7 @@ func NewSessionFromOptions(ctx context.Context, opts *Options) (*Session, error)
 	if opts.Resolver != nil {
 		s.resolver = opts.Resolver
 	} else {
-		s.resolver = apresolve.NewApResolver(opts.Log, s.client)
+		s.resolver = apresolve.NewApResolver(opts.Log, s.client, opts.PreferFirewallFriendlyPorts)
 	}
 
 	// create new login5.Login5
@@ -102,7 +102,6 @@ func NewSessionFromOptions(ctx context.Context, opts *Options) (*Session, error)
 			return nil, fmt.Errorf("failed authenticating accesspoint with stored credentials: %w", err)
 		}
 	case InteractiveCredentials:
-		ctx := context.Background()
 		serverCtx, serverCancel := context.WithCancel(ctx)
 
 		callbackPort, codeCh, err := NewOAuth2Server(serverCtx, opts.Log, creds.CallbackPort)
@@ -149,7 +148,13 @@ func NewSessionFromOptions(ctx context.Context, opts *Options) (*Session, error)
 		url := oauthConf.AuthCodeURL("", oauth2.S256ChallengeOption(verifier))
 		opts.Log.Infof("to complete authentication visit the following link: %s", url)
 
-		code := <-codeCh
+		var code string
+		select {
+		case code = <-codeCh:
+		case <-ctx.Done():
+			serverCancel()
+			return nil, fmt.Errorf("interactive authentication interrupted: %w", ctx.Err())
+		}
 		serverCancel()
 
 		token, err := oauthConf.Exchange(ctx, code, oauth2.VerifierOption(verifier))

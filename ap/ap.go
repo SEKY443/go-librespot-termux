@@ -59,6 +59,9 @@ type Accesspoint struct {
 	conn    net.Conn
 	encConn *shannonConn
 
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	done            chan struct{}
 	closeOnce       sync.Once
 	recvLoopOnce    sync.Once
@@ -73,10 +76,13 @@ type Accesspoint struct {
 }
 
 func NewAccesspoint(log librespot.Logger, addr librespot.GetAddressFunc, deviceId string) *Accesspoint {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Accesspoint{
 		log:       log,
 		addr:      addr,
 		deviceId:  deviceId,
+		ctx:       ctx,
+		cancel:    cancel,
 		done:      make(chan struct{}),
 		recvChans: make(map[PacketType][]chan Packet),
 	}
@@ -253,6 +259,7 @@ func (ap *Accesspoint) Close() {
 	ap.closeOnce.Do(func() {
 		close(ap.done)
 		ap.closeConn()
+		ap.cancel()
 	})
 }
 
@@ -323,7 +330,7 @@ loop:
 			break loop
 		default:
 			// no need to hold the connMu since reconnection happens in this routine
-			pkt, payload, err := ap.encConn.receivePacket(context.TODO())
+			pkt, payload, err := ap.encConn.receivePacket(ap.ctx)
 			if err != nil {
 				select {
 				case <-ap.done:
@@ -336,13 +343,11 @@ loop:
 
 			switch pkt {
 			case PacketTypePing:
-				ap.log.Tracef("received accesspoint ping")
-				if err := ap.Send(context.TODO(), PacketTypePong, payload); err != nil {
+				if err := ap.Send(ap.ctx, PacketTypePong, payload); err != nil {
 					ap.log.WithError(err).Errorf("failed sending Pong packet")
 					break loop
 				}
 			case PacketTypePongAck:
-				ap.log.Tracef("received accesspoint pong ack")
 				ap.notePongAck()
 				continue
 			default:
@@ -372,7 +377,7 @@ loop:
 		ap.connMu.Lock()
 		b := backoff.NewExponentialBackOff()
 		b.MaxElapsedTime = reconnectMaxElapsedTime
-		if err := backoff.Retry(ap.reconnect, b); err != nil {
+		if err := backoff.Retry(ap.reconnect, backoff.WithContext(b, ap.ctx)); err != nil {
 			ap.log.WithError(err).Errorf("failed reconnecting accesspoint")
 			ap.connMu.Unlock()
 
@@ -430,7 +435,7 @@ func (ap *Accesspoint) reconnect() (err error) {
 		return backoff.Permanent(fmt.Errorf("cannot reconnect without APWelcome"))
 	}
 
-	if err = ap.connect(context.TODO(), &pb.LoginCredentials{
+	if err = ap.connect(ap.ctx, &pb.LoginCredentials{
 		Typ:      ap.welcome.ReusableAuthCredentialsType,
 		Username: ap.welcome.CanonicalUsername,
 		AuthData: ap.welcome.ReusableAuthCredentials,

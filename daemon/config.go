@@ -12,14 +12,15 @@ type Config struct {
 	// AudioBackendCallTimeoutMs bounds how long a single call to the audio
 	// backend's server may take, in milliseconds. Zero uses the backend's own
 	// default. Only supported on the pulseaudio backend.
-	AudioBackendCallTimeoutMs int
-	AudioDevice               string
-	MixerDevice               string
-	MixerControlName          string
-	AudioBufferTime           int
-	AudioPeriodCount          int
-	AudioOutputPipe           string
-	AudioOutputPipeFormat     string
+	AudioBackendCallTimeoutMs    int
+	AudioDevice                  string
+	MixerDevice                  string
+	MixerControlName             string
+	AudioBufferTime              int
+	AudioPeriodCount             int
+	AudioOutputPipe              string
+	AudioOutputPipeFormat        string
+	AudioOutputPipeWaitForReader bool
 	// OptimisticPlaybackReplies, when true, replies to a play/pause/seek
 	// command as soon as it's accepted instead of waiting for the output
 	// backend to confirm it. See player.Options.OptimisticPlaybackReplies
@@ -43,6 +44,10 @@ type Config struct {
 	ZeroconfInterfacesToAdvertise []string
 
 	FlacEnabled bool
+
+	// PreferFirewallFriendlyPorts tries accesspoints on 443 and 80 before the
+	// default 4070, which some networks block outbound.
+	PreferFirewallFriendlyPorts bool
 
 	// ImageSize selects which cover-art image variant the API server returns:
 	// "default", "small", "medium", "large", "xlarge".

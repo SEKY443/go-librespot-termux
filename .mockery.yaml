@@ -9,5 +9,19 @@ template-data:
 packages:
   github.com/devgianlu/go-librespot:
     interfaces:
+      AudioSource:
       Logger:
       PageResolver:
+      StateStore:
+  github.com/devgianlu/go-librespot/output:
+    interfaces:
+      Output:
+  github.com/devgianlu/go-librespot/player:
+    interfaces:
+      EventManager:
+  github.com/devgianlu/go-librespot/tracks:
+    interfaces:
+      ContextResolver:
+  github.com/devgianlu/go-librespot/zeroconf:
+    interfaces:
+      ServiceRegistrar:

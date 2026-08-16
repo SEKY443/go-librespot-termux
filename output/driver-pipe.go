@@ -8,7 +8,6 @@ import (
 	"math"
 	"os"
 	"sync"
-	"syscall"
 
 	librespot "github.com/devgianlu/go-librespot"
 )
@@ -75,38 +74,6 @@ func newPipeTransform(format string) (func([]float32, []byte) int, error) {
 	default:
 		return nil, fmt.Errorf("unknown output pipe format: %s", format)
 	}
-}
-
-func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
-	out = &pipeOutput{
-		reader:         opts.Reader,
-		volume:         opts.InitialVolume,
-		err:            make(chan error, 2),
-		externalVolume: opts.ExternalVolume,
-		volumeUpdate:   opts.VolumeUpdate,
-	}
-
-	out.cond = sync.NewCond(&out.lock)
-
-	out.transform, err = newPipeTransform(opts.OutputPipeFormat)
-	if err != nil {
-		return nil, err
-	}
-
-	// Open the FIFO for writing as non-blocking to cause an error if there is no reader.
-	out.file, err = os.OpenFile(opts.OutputPipe, os.O_WRONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open fifo: %w", err)
-	}
-
-	// Restore blocking mode now that we are sure we have a reader.
-	if err := syscall.SetNonblock(int(out.file.Fd()), false); err != nil {
-		return nil, fmt.Errorf("failed to set blocking mode on fifo: %w", err)
-	}
-
-	go out.outputLoop()
-
-	return out, nil
 }
 
 func (out *pipeOutput) outputLoop() {

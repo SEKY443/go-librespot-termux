@@ -268,6 +268,8 @@ func (d *Dealer) handleRequest(rawMsg *RawMessage) {
 		return
 	}
 
+	// keep the command's raw JSON around too, so a command we don't model
+	// yet can still be inspected in full (see RawCommand)
 	var rawEnvelope struct {
 		Command json.RawMessage `json:"command"`
 	}

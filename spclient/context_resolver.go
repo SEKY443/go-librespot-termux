@@ -48,14 +48,33 @@ func isTracksComplete(ctx *connectpb.Context) bool {
 	return expectedNumberOfTracks == totalLength
 }
 
+// hasResolvablePages reports whether a context's pages can actually yield
+// tracks, either by holding some already or by naming where to fetch them.
+func hasResolvablePages(ctx *connectpb.Context) bool {
+	for _, page := range ctx.Pages {
+		if len(page.Tracks) > 0 || len(page.PageUrl) > 0 || len(page.NextPageUrl) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
 func NewContextResolver(ctx context.Context, log librespot.Logger, sp *Spclient, spotCtx *connectpb.Context) (_ *ContextResolver, err error) {
 	typ := librespot.InferSpotifyIdTypeFromContextUri(spotCtx.Uri)
 	if typ == librespot.SpotifyIdTypeUnknown {
 		return nil, fmt.Errorf("unsupported context type: %s", spotCtx.Uri)
 	}
 
-	if len(spotCtx.Pages) == 0 || !isTracksComplete(spotCtx) {
-		newSpotCtx, err := sp.ContextResolve(ctx, spotCtx.Uri)
+	if len(spotCtx.Pages) == 0 || !hasResolvablePages(spotCtx) || !isTracksComplete(spotCtx) {
+		var newSpotCtx *connectpb.Context
+		var err error
+		if strings.HasPrefix(spotCtx.Url, "hm://") {
+			log.WithField("uri", spotCtx.Uri).Debugf("resolving context from its own url %s", spotCtx.Url)
+			newSpotCtx, err = sp.ContextResolveUrl(ctx, spotCtx.Url)
+		} else {
+			newSpotCtx, err = sp.ContextResolve(ctx, spotCtx.Uri)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed resolving context %s: %w", spotCtx.Uri, err)
 		} else if newSpotCtx.Loading {
@@ -65,9 +84,7 @@ func NewContextResolver(ctx context.Context, log librespot.Logger, sp *Spclient,
 		if newSpotCtx.Metadata == nil {
 			newSpotCtx.Metadata = map[string]string{}
 		}
-		for key, val := range spotCtx.Metadata {
-			newSpotCtx.Metadata[key] = val
-		}
+		maps.Copy(newSpotCtx.Metadata, spotCtx.Metadata)
 
 		spotCtx = newSpotCtx
 	}
@@ -105,10 +122,9 @@ func (r *ContextResolver) loadPage(ctx context.Context, url string) (*connectpb.
 		return nil, fmt.Errorf("invalid page url: %s", url)
 	}
 
-	url = strings.TrimPrefix(url, "hm://")
 	r.log.WithField("uri", r.Uri()).Tracef("loading context page from %s", url)
 
-	resp, err := r.sp.Request(ctx, "GET", url, nil, nil, nil)
+	resp, err := r.sp.RequestHm(ctx, "GET", url, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed requesting page at %s: %w", url, err)
 	}

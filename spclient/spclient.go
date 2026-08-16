@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -41,7 +43,8 @@ func isRetryableHTTPStatus(status int) bool {
 type Spclient struct {
 	log librespot.Logger
 
-	client *http.Client
+	client           *http.Client
+	noRedirectClient *http.Client
 
 	baseUrl     *url.URL
 	clientToken string
@@ -57,8 +60,16 @@ func NewSpclient(ctx context.Context, log librespot.Logger, client *http.Client,
 	}
 
 	return &Spclient{
-		log:         log,
-		client:      client,
+		log:    log,
+		client: client,
+		noRedirectClient: &http.Client{
+			Transport: client.Transport,
+			Jar:       client.Jar,
+			Timeout:   client.Timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		baseUrl:     baseUrl,
 		clientToken: clientToken,
 		deviceId:    deviceId,
@@ -67,6 +78,10 @@ func NewSpclient(ctx context.Context, log librespot.Logger, client *http.Client,
 }
 
 func (c *Spclient) innerRequest(ctx context.Context, method string, reqUrl *url.URL, query url.Values, header http.Header, body []byte) (*http.Response, error) {
+	return c.innerRequestWith(ctx, c.client, method, reqUrl, query, header, body)
+}
+
+func (c *Spclient) innerRequestWith(ctx context.Context, client *http.Client, method string, reqUrl *url.URL, query url.Values, header http.Header, body []byte) (*http.Response, error) {
 	if query != nil {
 		reqUrl.RawQuery = query.Encode()
 	}
@@ -78,12 +93,12 @@ func (c *Spclient) innerRequest(ctx context.Context, method string, reqUrl *url.
 	}
 
 	if header != nil {
-		for name, values := range header {
-			req.Header[name] = values
-		}
+		maps.Copy(req.Header, header)
 	}
 
-	req.Header.Set("Client-Token", c.clientToken)
+	if len(c.clientToken) > 0 {
+		req.Header.Set("Client-Token", c.clientToken)
+	}
 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/x-protobuf")
@@ -116,7 +131,7 @@ func (c *Spclient) innerRequest(ctx context.Context, method string, reqUrl *url.
 			}
 		}
 
-		resp, err := c.client.Do(req.WithContext(ctx))
+		resp, err := client.Do(req.WithContext(ctx))
 		if err != nil {
 			return nil, err
 		}
@@ -164,6 +179,41 @@ func (c *Spclient) Request(ctx context.Context, method string, path string, quer
 	return c.innerRequest(ctx, method, reqUrl, query, header, body)
 }
 
+// RequestNoRedirect is Request but returns the redirect itself rather than
+// following it, for endpoints that answer with a Location instead of a body.
+func (c *Spclient) RequestNoRedirect(ctx context.Context, method string, path string, query url.Values, header http.Header, body []byte) (*http.Response, error) {
+	reqUrl := c.baseUrl.JoinPath(path)
+	return c.innerRequestWith(ctx, c.noRedirectClient, method, reqUrl, query, header, body)
+}
+
+// RequestHm issues a request against an hm:// URL, the form Spotify uses to name
+// spclient endpoints inside payloads.
+//
+// The remainder cannot simply be handed to Request as a path: JoinPath escapes
+// the "?" of a query string. The query is kept verbatim rather than being parsed
+// and re-encoded, so that a contextUri keeps its unescaped colons.
+func (c *Spclient) RequestHm(ctx context.Context, method string, hmUrl string, header http.Header, body []byte) (*http.Response, error) {
+	reqUrl, err := c.hmRequestUrl(hmUrl)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.innerRequest(ctx, method, reqUrl, nil, header, body)
+}
+
+func (c *Spclient) hmRequestUrl(hmUrl string) (*url.URL, error) {
+	if !strings.HasPrefix(hmUrl, "hm://") {
+		return nil, fmt.Errorf("invalid hm url: %s", hmUrl)
+	}
+
+	path, rawQuery, _ := strings.Cut(strings.TrimPrefix(hmUrl, "hm://"), "?")
+
+	reqUrl := c.baseUrl.JoinPath(path)
+	reqUrl.RawQuery = rawQuery
+
+	return reqUrl, nil
+}
+
 type putStateError struct {
 	ErrorType string `json:"error_type"`
 	Message   string `json:"message"`
@@ -194,12 +244,12 @@ func (c *Spclient) PutConnectStateInactive(ctx context.Context, spotConnId strin
 	}
 }
 
-func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqProto *connectpb.PutStateRequest) error {
+func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqProto *connectpb.PutStateRequest) (*connectpb.Cluster, error) {
 	reqBody, err := proto.Marshal(reqProto)
 	if err != nil {
-		return fmt.Errorf("failed marshalling PutStateRequest: %w", err)
+		return nil, fmt.Errorf("failed marshalling PutStateRequest: %w", err)
 	}
-	_, err = backoff.RetryWithData(func() (*http.Response, error) {
+	respBody, err := backoff.RetryWithData(func() ([]byte, error) {
 		resp, err := c.Request(
 			ctx,
 			"PUT",
@@ -237,13 +287,19 @@ func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqPr
 			return nil, reqErr
 		} else {
 			c.log.Debugf("put connect state because %s", reqProto.PutStateReason)
-			return resp, nil
+			return io.ReadAll(resp.Body)
 		}
 	}, backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), 2), ctx))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+
+	var cluster connectpb.Cluster
+	if err := proto.Unmarshal(respBody, &cluster); err != nil {
+		return nil, fmt.Errorf("failed unmarshalling Cluster: %w", err)
+	}
+
+	return &cluster, nil
 }
 
 // RateLimitedError reports a connect-state 429; RetryAfter is the advised cooldown.
@@ -436,6 +492,33 @@ func (c *Spclient) ContextResolve(ctx context.Context, uri string) (*connectpb.C
 
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("invalid status code from context resolve: %d", resp.StatusCode)
+	}
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading response body: %w", err)
+	}
+
+	var context connectpb.Context
+	if err := json.Unmarshal(respBytes, &context); err != nil {
+		return nil, fmt.Errorf("failed json unmarshalling Context: %w", err)
+	}
+
+	return &context, nil
+}
+
+// ContextResolveUrl resolves a context through the hm:// url the Context carries
+// rather than through /context-resolve/v1.
+func (c *Spclient) ContextResolveUrl(ctx context.Context, hmUrl string) (*connectpb.Context, error) {
+	resp, err := c.RequestHm(ctx, "GET", hmUrl, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("invalid status code from context resolve at %s: %d", hmUrl, resp.StatusCode)
 	}
 
 	respBytes, err := io.ReadAll(resp.Body)

@@ -7,7 +7,7 @@
   <br>
   Turn an old phone into an always-on Spotify Connect device on your home network.
   <br>
-  This fork is for my personal Android Termux home audio server, some of the changes may cause problems on other platforms.=
+  This fork is for my personal Android Termux home audio server, some of the changes may cause problems on other platforms.
 </p>
 
 <p align="center">
@@ -26,10 +26,11 @@
 ## Features
 
 - 🎵 **Spotify Connect** — show up as a speaker in the Spotify app and stream to it from any device on your network (Spotify Premium required).
-- 🔊 **Multiple audio backends** — ALSA, PulseAudio, or a raw named pipe for custom routing.
+- 🔊 **Multiple audio backends** — ALSA, PulseAudio, WASAPI on Windows, or a raw named pipe for custom routing.
 - 📊 **Loudness normalization** — Spotify-standard −14 LUFS (ITU-R BS.1770) with configurable pregain.
 - 🔀 **Crossfade** — configurable overlap between consecutive tracks.
 - 🎙️ **Podcast resume** — episodes pick up where you left off, and progress syncs back to your other devices.
+- 🎧 **DJ X** — Spotify's AI DJ, narration included: the spoken lines are synthesized and played around each track.
 - 🎚️ **Flexible volume control** — independent, synchronized with the ALSA mixer, or fully external.
 - 💾 **On-disk audio cache** — skip re-downloading tracks, bounded by an LRU size limit.
 - 🔐 **Multiple login flows** — Zeroconf discovery, interactive OAuth, or a Spotify access token.
@@ -41,15 +42,12 @@
 
 ## What's Different in This Fork
 
-Everything below was found and fixed while running this specifically as an Android/Termux home audio server. Most of it is general reliability work that isn't Android-specific, but a few PulseAudio fixes were driven by problems only observed on Termux's PulseAudio setup.
+Everything below was found and fixed while running this specifically as an Android/Termux home audio server. Most of it is general reliability work that isn't Android-specific, but a few PulseAudio fixes were driven by problems only observed on Termux's PulseAudio setup. Several fixes and features originally developed here (the sleep timer, the truncated-key/seek/data-race fixes, raw dealer payload logging) have since been contributed upstream and merged there too — they're no longer listed below since they're not a difference from upstream anymore.
 
 ### Reliability / connection fixes
 
 - Dealer/accesspoint reconnect could hang for up to 15 minutes after any disconnect, freezing all remote control — now bounded to 30s, and no longer blocks other operations (like the ping/pong keepalive) while reconnecting.
 - A slow command (e.g. loading a new track) could stall the dealer's read loop and starve pong replies, itself triggering a disconnect — request handling is now decoupled from the read loop.
-- Seeking near the end of a track could crash the whole track load — a seek estimate landing on/past the last page is now treated as a valid (if imprecise) seek instead of a hard failure.
-- Fixed a data race on a shared audio-decryption buffer (found with `-race`), affecting concurrent prefetch.
-- A truncated audio-key packet was silently accepted as a valid (wrong) key, causing confusing failures far downstream — now rejected clearly at the source.
 
 ### PulseAudio reliability (Android/Termux)
 
@@ -62,10 +60,7 @@ Everything below was found and fixed while running this specifically as an Andro
 
 ### New features
 
-- Implemented `set_sleep_timer` — both the duration and "end of current track" modes were previously entirely unimplemented.
-- Sleep timer state is now reflected back via `PlayerState.SleepTimer`, so the Spotify app's own UI actually shows it, and advertises the `SupportsRemoteSleepTimer` capability.
 - Added `optimistic_playback_replies` (opt-in, off by default): reply to play/pause/seek commands immediately instead of waiting for the audio backend to confirm them.
-- Unsupported dealer commands now log their full raw payload, so a new/unimplemented command's actual shape can be discovered instead of guessed at.
 
 ### Patched dependency
 
@@ -77,10 +72,6 @@ Everything below was found and fixed while running this specifically as an Andro
   ```
 
   Observed in the wild after ~28 hours of uptime, triggered by hitting a restricted/unplayable track. The patch is two `requested = 0` resets; it's reported upstream and should be dropped once fixed there.
-
-### Known trade-off
-
-- The `end_of_track` sleep timer mode can leave the Spotify app showing/controlling the *next* track instead of the one that just ended, if that next track was already gapless-prefetched. A fix for this was tried and reverted, since it exposed the PulseAudio library crash described above — which is now patched, so this is worth revisiting.
 
 ## Getting Started (Android / Termux)
 

@@ -35,17 +35,18 @@ type cliConfig struct {
 	DeviceType  string `koanf:"device_type"`
 	ClientToken string `koanf:"client_token"`
 
-	AudioBackend              string `koanf:"audio_backend"`
-	AudioBackendRuntimeSocket string `koanf:"audio_backend_runtime_socket"`
-	AudioBackendCallTimeoutMs int    `koanf:"audio_backend_call_timeout_ms"`
-	AudioDevice               string `koanf:"audio_device"`
-	MixerDevice               string `koanf:"mixer_device"`
-	MixerControlName          string `koanf:"mixer_control_name"`
-	AudioBufferTime           int    `koanf:"audio_buffer_time"`
-	AudioPeriodCount          int    `koanf:"audio_period_count"`
-	AudioOutputPipe           string `koanf:"audio_output_pipe"`
-	AudioOutputPipeFormat     string `koanf:"audio_output_pipe_format"`
-	OptimisticPlaybackReplies bool   `koanf:"optimistic_playback_replies"`
+	AudioBackend                 string `koanf:"audio_backend"`
+	AudioBackendRuntimeSocket    string `koanf:"audio_backend_runtime_socket"`
+	AudioBackendCallTimeoutMs    int    `koanf:"audio_backend_call_timeout_ms"`
+	AudioDevice                  string `koanf:"audio_device"`
+	MixerDevice                  string `koanf:"mixer_device"`
+	MixerControlName             string `koanf:"mixer_control_name"`
+	AudioBufferTime              int    `koanf:"audio_buffer_time"`
+	AudioPeriodCount             int    `koanf:"audio_period_count"`
+	AudioOutputPipe              string `koanf:"audio_output_pipe"`
+	AudioOutputPipeFormat        string `koanf:"audio_output_pipe_format"`
+	AudioOutputPipeWaitForReader bool   `koanf:"audio_output_pipe_wait_for_reader"`
+	OptimisticPlaybackReplies    bool   `koanf:"optimistic_playback_replies"`
 
 	Bitrate                       int      `koanf:"bitrate"`
 	VolumeSteps                   uint32   `koanf:"volume_steps"`
@@ -63,6 +64,7 @@ type cliConfig struct {
 	ZeroconfInterfacesToAdvertise []string `koanf:"zeroconf_interfaces_to_advertise"`
 	MprisEnabled                  bool     `koanf:"mpris_enabled"`
 	FlacEnabled                   bool     `koanf:"flac_enabled"`
+	PreferFirewallFriendlyPorts   bool     `koanf:"prefer_firewall_friendly_ports"`
 
 	Server struct {
 		Enabled     bool   `koanf:"enabled"`
@@ -103,17 +105,18 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 		DeviceType:  c.DeviceType,
 		ClientToken: c.ClientToken,
 
-		AudioBackend:              c.AudioBackend,
-		AudioBackendRuntimeSocket: c.AudioBackendRuntimeSocket,
-		AudioBackendCallTimeoutMs: c.AudioBackendCallTimeoutMs,
-		AudioDevice:               c.AudioDevice,
-		MixerDevice:               c.MixerDevice,
-		MixerControlName:          c.MixerControlName,
-		AudioBufferTime:           c.AudioBufferTime,
-		AudioPeriodCount:          c.AudioPeriodCount,
-		AudioOutputPipe:           c.AudioOutputPipe,
-		AudioOutputPipeFormat:     c.AudioOutputPipeFormat,
-		OptimisticPlaybackReplies: c.OptimisticPlaybackReplies,
+		AudioBackend:                 c.AudioBackend,
+		AudioBackendRuntimeSocket:    c.AudioBackendRuntimeSocket,
+		AudioBackendCallTimeoutMs:    c.AudioBackendCallTimeoutMs,
+		AudioDevice:                  c.AudioDevice,
+		MixerDevice:                  c.MixerDevice,
+		MixerControlName:             c.MixerControlName,
+		AudioBufferTime:              c.AudioBufferTime,
+		AudioPeriodCount:             c.AudioPeriodCount,
+		AudioOutputPipe:              c.AudioOutputPipe,
+		AudioOutputPipeFormat:        c.AudioOutputPipeFormat,
+		AudioOutputPipeWaitForReader: c.AudioOutputPipeWaitForReader,
+		OptimisticPlaybackReplies:    c.OptimisticPlaybackReplies,
 
 		Bitrate:                   c.Bitrate,
 		VolumeSteps:               c.VolumeSteps,
@@ -133,6 +136,8 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 
 		FlacEnabled: c.FlacEnabled,
 		ImageSize:   c.Server.ImageSize,
+
+		PreferFirewallFriendlyPorts: c.PreferFirewallFriendlyPorts,
 	}
 	dc.Cache.Enabled = c.Cache.Enabled
 	dc.Cache.Dir = c.Cache.Dir

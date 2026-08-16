@@ -60,6 +60,7 @@ type NewOutputOptions struct {
 	// Device specifies the audio device name.
 	//
 	// This feature is support only for the alsa and pulseaudio backend.
+	// The wasapi backend always uses the default playback endpoint.
 	Device string
 	// RuntimeSocket specifies a prefixed with protocol (e.g. `unix:` or `tcp:`) path
 	// to a runtime socket of audio backend.
@@ -88,8 +89,8 @@ type NewOutputOptions struct {
 
 	// InitialVolume specifies the initial output volume.
 	//
-	// This is only supported on the alsa backend. The PulseAudio backend uses
-	// the PulseAudio default volume.
+	// This is supported on the alsa, pipe, and wasapi backends. The PulseAudio
+	// backend uses the PulseAudio default volume.
 	InitialVolume float32
 
 	// ExternalVolume specifies, if the volume is controlled outside the app.
@@ -127,6 +128,14 @@ type NewOutputOptions struct {
 	// slow-but-working setup (observed: PulseAudio over a bridge on Android)
 	// may genuinely need longer than the default to complete a single call.
 	CallTimeout time.Duration
+
+	// OutputPipeWaitForReader makes the pipe backend wait for a reader to
+	// appear when opening the FIFO, instead of failing if none is present at the
+	// time playback starts. This is useful for readers (e.g. snapcast with
+	// dryout) that only connect to the FIFO when data is expected.
+	//
+	// This is only supported on the pipe backend.
+	OutputPipeWaitForReader bool
 }
 
 func NewOutput(options *NewOutputOptions) (Output, error) {
@@ -151,6 +160,12 @@ func NewOutput(options *NewOutputOptions) (Output, error) {
 		return out, nil
 	case "audio-toolbox":
 		out, err := newAudioToolboxOutput(options)
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
+	case "wasapi":
+		out, err := newWasapiOutput(options)
 		if err != nil {
 			return nil, err
 		}
