@@ -178,6 +178,28 @@ func (s *NarratedSource) Read(p []float32) (int, error) {
 	}
 }
 
+// EnsureReady blocks until whatever Read would return first is resolved -
+// waiting out a still-synthesizing intro here, rather than leaving that wait
+// for the audio output's first Read call.
+//
+// This matters because of how the pulseaudio backend's first Start() call
+// works (see third_party/pulse/playback.go): it uncorks the server-side
+// stream and only then waits for the reader to produce the first buffer.
+// PulseAudio treats a slow-arriving first buffer as an underrun right at
+// stream startup, which on at least one real backend (see driver-pulseaudio.go's
+// PlaybackLatency comment) has been observed to audibly repeat the
+// beginning of playback once data does arrive, rather than merely a longer
+// silence. A synchronous Read taking that first hit is a much larger
+// problem than the same wait happening here, before the source is ever
+// handed to the output layer.
+//
+// Safe to skip - Read would resolve the same pending channel itself, just
+// too late for the output layer's sake. Call it once, right before handing
+// the source to the output layer (e.g. Player.SetPrimaryStream).
+func (s *NarratedSource) EnsureReady() {
+	s.current()
+}
+
 // current resolves (receiving from its channel, blocking if synthesis is
 // still in flight) and returns the source for the current stage, skipping
 // past any stage that turns out to have nothing to play.
