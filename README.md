@@ -3,11 +3,14 @@
 <h1 align="center">go-librespot-termux</h1>
 
 <p align="center">
+  
   <em>A go-librespot fork tuned for running a Spotify Connect speaker on Android, via Termux.</em>
   <br>
   Turn an old phone into an always-on Spotify Connect device on your home network.
   <br>
   This fork is for my personal Android Termux home audio server, some of the changes may cause problems on other platforms.
+  <br>
+  **If you think this is too complex to use, check my Android app <a href="https://github.com/SEKY443/Android-LibreThing">LibreThing</a>.**
 </p>
 
 <p align="center">
