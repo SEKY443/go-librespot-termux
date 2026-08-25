@@ -214,7 +214,16 @@ func (d *Dealer) handleMessage(rawMsg *RawMessage) {
 	}
 
 	for _, recv := range matchedReceivers {
-		recv.c <- msg
+		// handleRequest below guards its own receiver send against d.done the
+		// same way -- a receiver's channel gets closed once the recv loop
+		// gives up (see the shutdown block at the end of that loop), and an
+		// in-flight dispatch racing that close would otherwise panic sending
+		// on a closed channel instead of just dropping the message.
+		select {
+		case recv.c <- msg:
+		case <-d.done:
+			return
+		}
 	}
 }
 
