@@ -16,6 +16,17 @@ func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
 		err:            make(chan error, 2),
 		externalVolume: opts.ExternalVolume,
 		volumeUpdate:   opts.VolumeUpdate,
+		// outputLoop below starts running the instant it's launched a few
+		// lines down, before any caller gets a chance to call Pause/Resume
+		// on the returned Output -- every player.go call site that creates
+		// one immediately does call one or the other right after, so
+		// starting paused here just makes that the true initial state
+		// instead of racing it. Without this, a load that's meant to start
+		// paused (player.go's playerCmdSet with data.paused true) could have
+		// outputLoop already read and written a chunk of real decoded audio
+		// to the pipe before the caller's Pause() call lands, briefly
+		// leaking audible sound.
+		paused: true,
 	}
 
 	out.cond = sync.NewCond(&out.lock)
