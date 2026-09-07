@@ -131,6 +131,16 @@ func (r *ContextResolver) loadPage(ctx context.Context, url string) (*connectpb.
 
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == 404 {
+		// A page URL the server itself just handed us (NextPageUrl) that then 404s isn't a
+		// transient failure to retry -- it means that page genuinely doesn't exist (seen in
+		// practice with an autoplay radio station that ran out of tracks mid-page). Reporting
+		// this as end-of-list rather than a generic error stops Page's caller (pagedListInterator.next,
+		// via fetchNextPage) from re-requesting the same permanently-404 URL every time the "up
+		// next" queue or actual playback advance is refreshed -- previously observed retrying
+		// every couple of minutes for hours straight.
+		return nil, io.EOF
+	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("invalid status code from page at %s: %d", url, resp.StatusCode)
 	}
