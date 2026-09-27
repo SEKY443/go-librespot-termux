@@ -58,7 +58,7 @@ type MediaPlayer2PlayerInterfaceInterface interface {
 	PlayPause() *dbus.Error
 	Stop() *dbus.Error
 	Play() *dbus.Error
-	Seek(int64) *dbus.Error
+	SeekBy(int64) *dbus.Error
 	SetPosition(dbus.ObjectPath, int64) *dbus.Error
 	OpenUri(dbus.ObjectPath) *dbus.Error
 }
@@ -86,7 +86,10 @@ func (p MediaPlayer2PlayerInterface) Props() map[string]*prop.Prop {
 }
 
 func (p MediaPlayer2PlayerInterface) enqueueCommand(command MediaPlayer2PlayerCommand) *dbus.Error {
-	command.response = make(chan MediaPlayer2PlayerCommandResponse)
+	// Buffered so that replying never waits on this goroutine getting back to
+	// the read below: the reply comes from the player loop, which must not
+	// block on a D-Bus caller.
+	command.response = make(chan MediaPlayer2PlayerCommandResponse, 1)
 
 	select {
 	case p.commands <- command:
@@ -197,7 +200,11 @@ func (p MediaPlayer2PlayerInterface) Play() *dbus.Error {
 		},
 	)
 }
-func (p MediaPlayer2PlayerInterface) Seek(x int64) *dbus.Error {
+
+// SeekBy is the MPRIS Seek method, exported under that name (see
+// playerMethodNames). Called Seek in Go it would look like io.Seeker with the
+// wrong signature, which go vet rejects.
+func (p MediaPlayer2PlayerInterface) SeekBy(x int64) *dbus.Error {
 	p.log.Tracef("PlayerInterface::Seek (%d)", x)
 
 	return p.enqueueCommand(

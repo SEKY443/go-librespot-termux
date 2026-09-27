@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/proto/spotify/metadata"
@@ -43,12 +44,38 @@ type ConcreteServer struct {
 	playerInterface MediaPlayer2PlayerInterface
 
 	lastUploadedState MediaState
-	closed            bool
+
+	closeOnce sync.Once
+	done      chan struct{}
 
 	log librespot.Logger
 
+	// Latest-wins queues of depth one: only the most recent state is worth
+	// publishing, and the emitter — the player loop — must never wait on D-Bus.
 	stateChannel chan MediaState
 	seekChannel  chan SeekState
+}
+
+// offer replaces whatever is queued with val, without ever blocking. Returns
+// false once the server is closed.
+func offer[T any](done <-chan struct{}, ch chan T, val T) bool {
+	select {
+	case <-done:
+		return false
+	default:
+	}
+
+	select {
+	case <-ch:
+	default:
+	}
+
+	select {
+	case ch <- val:
+		return true
+	default:
+		return false
+	}
 }
 
 func last[T any](a []T) T {
@@ -117,12 +144,16 @@ func makeMetadata(uri *string, media *librespot.Media) map[string]any {
 	return m
 }
 
+// playerMethodNames maps Go method names on the player interface to the D-Bus
+// names MPRIS gives them, where the two differ.
+var playerMethodNames = map[string]string{"SeekBy": "Seek"}
+
 func (s *ConcreteServer) EmitStateUpdate(state MediaState) {
-	s.stateChannel <- state
+	offer(s.done, s.stateChannel, state)
 }
 
 func (s *ConcreteServer) EmitSeekUpdate(state SeekState) {
-	s.seekChannel <- state
+	offer(s.done, s.seekChannel, state)
 }
 
 func (s *ConcreteServer) Receive() <-chan MediaPlayer2PlayerCommand {
@@ -173,8 +204,10 @@ func (s *ConcreteServer) executeSeekSignal(state SeekState) error {
 }
 
 func (s *ConcreteServer) waitOnChannel() {
-	for !s.closed {
+	for {
 		select {
+		case <-s.done:
+			return
 		case state := <-s.stateChannel:
 			err := s.executeStateUpdate(state)
 			if err != nil {
@@ -191,10 +224,7 @@ func (s *ConcreteServer) waitOnChannel() {
 }
 
 func (s *ConcreteServer) Close() error {
-	s.closed = true
-
-	close(s.seekChannel)
-	close(s.stateChannel)
+	s.closeOnce.Do(func() { close(s.done) })
 
 	return s.dbus.conn.Close()
 }
@@ -219,9 +249,9 @@ func NewServer(logger librespot.Logger) (_ *ConcreteServer, err error) {
 			PositionMs:     0,
 			Media:          nil,
 		},
-		closed:       false,
-		stateChannel: make(chan MediaState),
-		seekChannel:  make(chan SeekState),
+		done:         make(chan struct{}),
+		stateChannel: make(chan MediaState, 1),
+		seekChannel:  make(chan SeekState, 1),
 	}
 
 	conn, err := dbus.SessionBus()
@@ -255,7 +285,7 @@ func NewServer(logger librespot.Logger) (_ *ConcreteServer, err error) {
 	if err != nil {
 		return nil, err
 	}
-	err = conn.Export(s.playerInterface, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player")
+	err = conn.ExportWithMap(s.playerInterface, playerMethodNames, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player")
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
@@ -50,7 +51,7 @@ type Player struct {
 	normalisationEnabled      bool
 	normalisationUseAlbumGain bool
 	normalisationPregain      float32
-	countryCode               *string
+	countryCode               func() string
 
 	sp       *spclient.Spclient
 	audioKey *audio.KeyProvider
@@ -79,6 +80,10 @@ type Player struct {
 	// Play/Pause/Seek/Set command relative to the output actually confirming
 	// the change - see Options.OptimisticPlaybackReplies.
 	optimisticPlaybackReplies bool
+
+	// streamGen counts the primary streams set, so that events can say which
+	// one they came from. Written only by manageLoop, read from anywhere.
+	streamGen atomic.Uint64
 }
 
 type playerCmdType int
@@ -137,8 +142,10 @@ type Options struct {
 	// a track change. Zero disables crossfading.
 	CrossfadeDuration time.Duration
 
-	// CountryCode specifies the country code to use for media restrictions.
-	CountryCode *string
+	// CountryCode reports the country code to use for media restrictions. It is
+	// read while building a stream, which happens off the daemon's player loop,
+	// so it is a function rather than a pointer the daemon writes through.
+	CountryCode func() string
 
 	// AudioBackend specifies the audio backend to use (alsa, pulseaudio, etc).
 	AudioBackend string
@@ -395,7 +402,10 @@ loop:
 					time.Sleep(300 * time.Millisecond)
 				}
 
-				// set source
+				// Counted before the events below so they carry the stream they
+				// describe, and so that whoever set it can tell which that was.
+				p.streamGen.Add(1)
+
 				source.SetPrimary(data.source)
 
 				runOutputOp(cmd, func() error {
@@ -407,9 +417,9 @@ loop:
 					paused = data.paused
 					p.startedPlaying = time.Now()
 					if data.paused {
-						p.ev <- Event{Type: EventTypePause}
+						p.ev <- Event{Type: EventTypePause, StreamGen: p.streamGen.Load()}
 					} else {
-						p.ev <- Event{Type: EventTypePlay}
+						p.ev <- Event{Type: EventTypePlay, StreamGen: p.streamGen.Load()}
 					}
 				})
 			case playerCmdPlay:
@@ -419,7 +429,7 @@ loop:
 				}
 				runOutputOp(cmd, out.Resume, func() {
 					paused = false
-					p.ev <- Event{Type: EventTypeResume}
+					p.ev <- Event{Type: EventTypeResume, StreamGen: p.streamGen.Load()}
 				})
 			case playerCmdPause:
 				if out == nil {
@@ -429,7 +439,7 @@ loop:
 				}
 				runOutputOp(cmd, out.Pause, func() {
 					paused = true
-					p.ev <- Event{Type: EventTypePause}
+					p.ev <- Event{Type: EventTypePause, StreamGen: p.streamGen.Load()}
 				})
 			case playerCmdStop:
 				if out != nil {
@@ -439,7 +449,7 @@ loop:
 				}
 
 				cmd.resp <- struct{}{}
-				p.ev <- Event{Type: EventTypeStop}
+				p.ev <- Event{Type: EventTypeStop, StreamGen: p.streamGen.Load()}
 			case playerCmdSeek:
 				// Update the source's position regardless of output state:
 				// previously this was skipped whenever out was nil, silently
@@ -566,9 +576,9 @@ loop:
 			p.log.Tracef("cleared closed output device")
 
 			// FIXME: this is called even if not needed, like when autoplay starts
-			p.ev <- Event{Type: EventTypeStop}
+			p.ev <- Event{Type: EventTypeStop, StreamGen: p.streamGen.Load(), Err: err}
 		case <-source.Done():
-			p.ev <- Event{Type: EventTypeNotPlaying}
+			p.ev <- Event{Type: EventTypeNotPlaying, StreamGen: p.streamGen.Load()}
 		}
 	}
 
@@ -588,6 +598,13 @@ func (p *Player) HasBeenPlayingFor() time.Duration {
 	}
 
 	return time.Since(p.startedPlaying)
+}
+
+// StreamGen identifies the primary stream currently set, counting up each time
+// one is set. Read it after SetPrimaryStream to learn which generation the
+// stream just handed over is; events carry the same value.
+func (p *Player) StreamGen() uint64 {
+	return p.streamGen.Load()
 }
 
 func (p *Player) Receive() <-chan Event {
@@ -824,13 +841,13 @@ func (p *Player) getUnrestrictedTrack(ctx context.Context, spotId librespot.Spot
 	}
 
 	media := librespot.NewMediaFromTrack(&trackMeta)
-	if !isMediaRestricted(media, *p.countryCode) {
+	if !isMediaRestricted(media, p.countryCode()) {
 		return &trackMeta, nil
 	}
 
 	for _, alt := range trackMeta.Alternative {
 		media = librespot.NewMediaFromTrack(alt)
-		if !isMediaRestricted(media, *p.countryCode) {
+		if !isMediaRestricted(media, p.countryCode()) {
 			// Clear alternatives to avoid confusion
 			trackMeta.Alternative = nil
 
@@ -846,6 +863,17 @@ func (p *Player) getUnrestrictedTrack(ctx context.Context, spotId librespot.Spot
 
 	// We tried all alternatives, still restricted
 	return nil, librespot.ErrMediaRestricted
+}
+
+// StartPosition is where media of the given duration should start playing when
+// asked to start at position. A position past the end, which a transfer from a
+// client with stale playback state can carry, would end the track the moment it
+// started and skip straight to the next one, so the track starts over instead.
+func StartPosition(position, duration int64) int64 {
+	if position <= 0 || position >= duration {
+		return 0
+	}
+	return position
 }
 
 func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId librespot.SpotifyId, bitrate int, mediaPosition int64) (*Stream, error) {
@@ -912,7 +940,7 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		}
 
 		media = librespot.NewMediaFromEpisode(&episodeMeta)
-		if isMediaRestricted(media, *p.countryCode) {
+		if isMediaRestricted(media, p.countryCode()) {
 			return nil, librespot.ErrMediaRestricted
 		}
 
@@ -1055,10 +1083,12 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 	}
 
 	// Seek to the correct position if needed.
-	if mediaPosition > 0 {
-		if err := stream.SetPositionMs(max(0, min(mediaPosition, int64(media.Duration())))); err != nil {
+	if position := StartPosition(mediaPosition, int64(media.Duration())); position > 0 {
+		if err := stream.SetPositionMs(position); err != nil {
 			return nil, fmt.Errorf("failed seeking stream: %w", err)
 		}
+	} else if mediaPosition > 0 {
+		log.Debugf("start position %dms is past the end (%dms), starting from the beginning", mediaPosition, media.Duration())
 	}
 
 	streamHandedOff = true

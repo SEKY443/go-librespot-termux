@@ -6,21 +6,11 @@ import (
 	"errors"
 	"io"
 	"testing"
-	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/player"
 	"github.com/stretchr/testify/mock"
 )
-
-// resolved wraps src (nil included) in an already-filled channel, standing in
-// for narration synthesis that has already finished by the time it's needed -
-// the common case NewNarratedSource is built around.
-func resolved(src librespot.AudioSource) <-chan librespot.AudioSource {
-	ch := make(chan librespot.AudioSource, 1)
-	ch <- src
-	return ch
-}
 
 // emitting sets a mock up to serve n samples of value v, then io.EOF, so the
 // join between the lead-in and the track can be checked sample by sample.
@@ -73,7 +63,7 @@ func TestNarratedPlaysIntroThenTrack(t *testing.T) {
 	lead := emitting(t, 100, 0.25)
 	main := emitting(t, 200, 0.75)
 
-	got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(lead), main, false, nil))
+	got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, lead, main, nil))
 
 	if len(got) != 300 {
 		t.Fatalf("got %d samples, want 300", len(got))
@@ -96,7 +86,7 @@ func TestNarratedSurvivesBrokenIntro(t *testing.T) {
 
 	main := emitting(t, 128, 0.5)
 
-	got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(lead), main, false, nil))
+	got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, lead, main, nil))
 
 	if len(got) != 128 {
 		t.Fatalf("got %d samples, want the full track (128) despite the broken lead-in", len(got))
@@ -107,81 +97,8 @@ func TestNarratedEmptyIntro(t *testing.T) {
 	lead := emitting(t, 0, 0)
 	main := emitting(t, 64, 0.5)
 
-	if got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(lead), main, false, nil)); len(got) != 64 {
+	if got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, lead, main, nil)); len(got) != 64 {
 		t.Fatalf("got %d samples, want 64", len(got))
-	}
-}
-
-// A pending intro - synthesis not resolved by the time it's needed - is
-// waited on rather than skipped.
-func TestNarratedWaitsForPendingIntro(t *testing.T) {
-	lead := emitting(t, 40, 0.25)
-	main := emitting(t, 60, 0.75)
-
-	ch := make(chan librespot.AudioSource, 1)
-	go func() { ch <- lead }()
-
-	got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, true, ch, main, false, nil))
-	if len(got) != 100 {
-		t.Fatalf("got %d samples, want 100 (40 intro + 60 track)", len(got))
-	}
-}
-
-// EnsureReady is meant to be called before the source ever reaches the
-// output layer, precisely so a still-synthesizing intro's wait happens
-// there rather than inside the output's own first Read call (see its doc
-// comment for why that matters for the pulseaudio backend specifically).
-func TestNarratedEnsureReadyWaitsOutPendingIntro(t *testing.T) {
-	lead := emitting(t, 40, 0.25)
-	main := emitting(t, 60, 0.75)
-
-	ch := make(chan librespot.AudioSource, 1)
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		time.Sleep(20 * time.Millisecond) // stand in for synthesis still in flight
-		ch <- lead
-	}()
-	<-started
-
-	s := player.NewNarratedSource(&librespot.NullLogger{}, true, ch, main, false, nil)
-	s.EnsureReady() // blocks until the send above happens
-
-	// With EnsureReady already having resolved the intro, the very first
-	// Read must return immediately - nothing left to wait on. Its samples
-	// still count towards the total below, same as any other Read.
-	buf := make([]float32, 64)
-	type readResult struct {
-		n   int
-		err error
-	}
-	done := make(chan readResult, 1)
-	go func() {
-		n, err := s.Read(buf)
-		done <- readResult{n, err}
-	}()
-
-	var first []float32
-	select {
-	case r := <-done:
-		first = append(first, buf[:r.n]...)
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("Read blocked after EnsureReady already resolved the intro")
-	}
-
-	got := append(first, drainSource(t, s)...)
-	if len(got) != 100 {
-		t.Fatalf("got %d samples, want 100 (40 intro + 60 track)", len(got))
-	}
-}
-
-// Synthesis resolving to nil (failed or timed out) is the same as never
-// having had an intro at all.
-func TestNarratedIntroSynthesisFailed(t *testing.T) {
-	main := emitting(t, 64, 0.5)
-
-	if got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(nil), main, false, nil)); len(got) != 64 {
-		t.Fatalf("got %d samples, want the full track (64) with no intro", len(got))
 	}
 }
 
@@ -192,7 +109,7 @@ func TestNarratedSeekSkipsIntro(t *testing.T) {
 	main := emitting(t, 100, 0.75)
 	main.EXPECT().SetPositionMs(int64(5000)).Return(nil).Once()
 
-	s := player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(lead), main, false, nil)
+	s := player.NewNarratedSource(&librespot.NullLogger{}, lead, main, nil)
 	if err := s.SetPositionMs(5000); err != nil {
 		t.Fatalf("seek failed: %v", err)
 	}
@@ -204,24 +121,6 @@ func TestNarratedSeekSkipsIntro(t *testing.T) {
 	}
 }
 
-// Seeking abandons a still-synthesizing intro too, without waiting on it.
-func TestNarratedSeekAbandonsPendingIntro(t *testing.T) {
-	main := emitting(t, 50, 0.75)
-	main.EXPECT().SetPositionMs(int64(2000)).Return(nil).Once()
-
-	introCh := make(chan librespot.AudioSource) // never sent to
-
-	s := player.NewNarratedSource(&librespot.NullLogger{}, true, introCh, main, false, nil)
-	if err := s.SetPositionMs(2000); err != nil {
-		t.Fatalf("seek failed: %v", err)
-	}
-
-	got := drainSource(t, s)
-	if len(got) != 50 {
-		t.Fatalf("got %d samples, want 50 (track only, seek must not block on the abandoned intro)", len(got))
-	}
-}
-
 // Position is the track's, so a controller shows the track as not yet started
 // while the DJ is talking rather than jumping around.
 func TestNarratedPositionIsTrackPosition(t *testing.T) {
@@ -230,7 +129,7 @@ func TestNarratedPositionIsTrackPosition(t *testing.T) {
 	main := librespot.NewMockAudioSource(t)
 	main.EXPECT().PositionMs().Return(42).Once()
 
-	if pos := player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(lead), main, false, nil).PositionMs(); pos != 42 {
+	if pos := player.NewNarratedSource(&librespot.NullLogger{}, lead, main, nil).PositionMs(); pos != 42 {
 		t.Errorf("PositionMs = %d, want the main source's 42", pos)
 	}
 }
@@ -240,7 +139,7 @@ func TestNarratedPlaysOutroAfterTrack(t *testing.T) {
 	main := emitting(t, 100, 0.75)
 	outro := emitting(t, 30, 0.5)
 
-	got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(intro), main, true, resolved(outro)))
+	got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, intro, main, outro))
 
 	if len(got) != 180 {
 		t.Fatalf("got %d samples, want 180 (50 intro + 100 track + 30 outro)", len(got))
@@ -265,7 +164,7 @@ func TestNarratedOutroOnly(t *testing.T) {
 	main := emitting(t, 64, 0.75)
 	outro := emitting(t, 16, 0.5)
 
-	if got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, false, nil, main, true, resolved(outro))); len(got) != 80 {
+	if got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, nil, main, outro)); len(got) != 80 {
 		t.Fatalf("got %d samples, want 80", len(got))
 	}
 }
@@ -277,24 +176,8 @@ func TestNarratedSurvivesBrokenOutro(t *testing.T) {
 	outro := librespot.NewMockAudioSource(t)
 	outro.EXPECT().Read(mock.Anything).Return(0, errors.New("cdn went away")).Maybe()
 
-	if got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, false, nil, main, true, resolved(outro))); len(got) != 64 {
+	if got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, nil, main, outro)); len(got) != 64 {
 		t.Fatalf("got %d samples, want the full track (64)", len(got))
-	}
-}
-
-// The common case: outro synthesis, kicked off well before the track ends,
-// has already resolved by the time playback actually reaches it, so Read
-// does not block waiting on it.
-func TestNarratedOutroAlreadyReadyDoesNotBlock(t *testing.T) {
-	main := emitting(t, 64, 0.75)
-	outro := emitting(t, 16, 0.5)
-
-	// A channel nothing is still sending to - if Read blocked on it, this
-	// would hang instead of returning EOF once drained.
-	ch := resolved(outro)
-
-	if got := drainSource(t, player.NewNarratedSource(&librespot.NullLogger{}, false, nil, main, true, ch)); len(got) != 80 {
-		t.Fatalf("got %d samples, want 80 (64 track + 16 outro)", len(got))
 	}
 }
 
@@ -308,7 +191,7 @@ func TestNarratedSeekKeepsOutro(t *testing.T) {
 
 	outro := emitting(t, 20, 0.5)
 
-	s := player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(intro), main, true, resolved(outro))
+	s := player.NewNarratedSource(&librespot.NullLogger{}, intro, main, outro)
 	if err := s.SetPositionMs(1000); err != nil {
 		t.Fatalf("seek failed: %v", err)
 	}
@@ -336,7 +219,7 @@ func TestNarratedOutroSurvivesCrossfade(t *testing.T) {
 
 	track := emitting(t, 2000, 0.75)
 	outro := emitting(t, 500, 0.5)
-	narrated := player.NewNarratedSource(&librespot.NullLogger{}, false, nil, track, true, resolved(outro))
+	narrated := player.NewNarratedSource(&librespot.NullLogger{}, nil, track, outro)
 
 	if !narrated.NoCrossfade() {
 		t.Fatal("a source ending in an outro should decline crossfading")
@@ -384,20 +267,9 @@ func TestNarratedOutroSurvivesCrossfade(t *testing.T) {
 // A track with only an introduction still crossfades: its tail is ordinary
 // music, so there is nothing to protect.
 func TestNarratedIntroOnlyStillCrossfades(t *testing.T) {
-	narrated := player.NewNarratedSource(&librespot.NullLogger{}, true, resolved(emitting(t, 100, 0.25)), emitting(t, 500, 0.75), false, nil)
+	narrated := player.NewNarratedSource(&librespot.NullLogger{}, emitting(t, 100, 0.25), emitting(t, 500, 0.75), nil)
 
 	if narrated.NoCrossfade() {
 		t.Error("a source with no outro should crossfade as usual")
-	}
-}
-
-// hasOutro is known from metadata up front, independent of whether synthesis
-// itself later succeeds - so a track declaring an outro still declines
-// crossfading even if that outro's synthesis ultimately fails.
-func TestNarratedDeclinesCrossfadeEvenIfOutroSynthesisFails(t *testing.T) {
-	narrated := player.NewNarratedSource(&librespot.NullLogger{}, false, nil, emitting(t, 100, 0.75), true, resolved(nil))
-
-	if !narrated.NoCrossfade() {
-		t.Fatal("a track declaring an outro should decline crossfading regardless of synthesis outcome")
 	}
 }

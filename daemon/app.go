@@ -45,6 +45,20 @@ type App struct {
 
 	audioCache *cache.Cache
 
+	// metaCache and contextLists back the opt-in metadata features. They live
+	// here rather than on the player so that a session swap (logout, a new
+	// zeroconf user) keeps what was fetched. Both are nil when metadata.enabled
+	// is false, and every helper treats a nil cache as a no-op.
+	metaCache    *trackMetaCache
+	contextLists *contextListCache
+
+	// stateMu guards state and the store behind it. Two AppPlayers overlap
+	// briefly whenever a zeroconf session is replaced, and volume changes are
+	// written back from off the player loop.
+	stateMu   sync.Mutex
+	saving    bool
+	saveDirty bool
+
 	closed bool
 }
 
@@ -138,6 +152,11 @@ func New(opts *Options) (*App, error) {
 		}
 	}
 
+	if app.cfg.Metadata.Enabled {
+		app.metaCache = newTrackMetaCache()
+		app.contextLists = newContextListCache()
+	}
+
 	return app, nil
 }
 
@@ -206,10 +225,45 @@ func (app *App) Close() error {
 }
 
 func (app *App) persistState() error {
+	app.stateMu.Lock()
+	defer app.stateMu.Unlock()
+
 	if err := app.stateStore.Save(app.state); err != nil {
 		return fmt.Errorf("persisting state: %w", err)
 	}
 	return nil
+}
+
+// requestPersist writes the state out off the caller's goroutine, coalescing
+// repeated requests into the one save still to come. Saving is a temp file plus
+// a rename, slow enough on the hardware this runs on to be worth keeping away
+// from the player loop.
+func (app *App) requestPersist() {
+	app.stateMu.Lock()
+	app.saveDirty = true
+	if app.saving {
+		app.stateMu.Unlock()
+		return
+	}
+	app.saving = true
+	app.stateMu.Unlock()
+
+	go func() {
+		for {
+			app.stateMu.Lock()
+			if !app.saveDirty {
+				app.saving = false
+				app.stateMu.Unlock()
+				return
+			}
+			app.saveDirty = false
+			app.stateMu.Unlock()
+
+			if err := app.persistState(); err != nil {
+				app.log.WithError(err).Error("failed persisting state")
+			}
+		}
+	}()
 }
 
 func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err error) {
@@ -221,7 +275,6 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 		cancel:          playerCancel,
 		stop:            make(chan struct{}, 1),
 		logout:          app.logoutCh,
-		countryCode:     new(string),
 		volumeUpdate:    make(chan float32, 1),
 		playbackReadyCh: make(chan struct{}),
 	}
@@ -238,6 +291,12 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 	appPlayer.sleepTimer = time.NewTimer(math.MaxInt64)
 	appPlayer.sleepTimer.Stop()
 
+	appPlayer.stateTimer = time.NewTimer(math.MaxInt64)
+	appPlayer.stateTimer.Stop()
+
+	appPlayer.metaPrefetchTimer = time.NewTimer(math.MaxInt64)
+	appPlayer.metaPrefetchTimer.Stop()
+
 	if appPlayer.sess, err = session.NewSessionFromOptions(ctx, &session.Options{
 		Log:         app.log,
 		DeviceType:  app.deviceType,
@@ -252,6 +311,11 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 	}
 
 	appPlayer.initState()
+	appPlayer.loader = newLoaderLane(app.log)
+	appPlayer.statePush = newStatePushLane(app.log, appPlayer.sess.Spclient(), app.deviceId)
+	if app.metaCache != nil {
+		appPlayer.meta = newMetaFetcher(app.log, app.metaCache, appPlayer.sess.Spclient())
+	}
 
 	if appPlayer.player, err = player.NewPlayer(&player.Options{
 		Spclient: appPlayer.sess.Spclient(),
@@ -269,7 +333,7 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 
 		CrossfadeDuration: time.Duration(app.cfg.CrossfadeDuration) * time.Millisecond,
 
-		CountryCode: appPlayer.countryCode,
+		CountryCode: appPlayer.CountryCode,
 
 		AudioBackend:              app.cfg.AudioBackend,
 		AudioBackendRuntimeSocket: app.cfg.AudioBackendRuntimeSocket,
@@ -350,8 +414,10 @@ func (app *App) withCredentials(ctx context.Context, creds any) (err error) {
 				return nil, err
 			}
 
+			app.stateMu.Lock()
 			app.state.Credentials.Username = appPlayer.sess.Username()
 			app.state.Credentials.Data = appPlayer.sess.StoredCredentials()
+			app.stateMu.Unlock()
 
 			if err = app.persistState(); err != nil {
 				return nil, err
@@ -599,8 +665,10 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 		}
 
 		if app.cfg.Credentials.Zeroconf.PersistCredentials {
+			app.stateMu.Lock()
 			app.state.Credentials.Username = newAppPlayer.sess.Username()
 			app.state.Credentials.Data = newAppPlayer.sess.StoredCredentials()
+			app.stateMu.Unlock()
 
 			if err := app.persistState(); err != nil {
 				app.log.WithError(err).Errorf("failed persisting zeroconf credentials")

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/devgianlu/go-librespot/daemon"
 	"github.com/gofrs/flock"
@@ -56,6 +57,7 @@ type cliConfig struct {
 	NormalisationUseAlbumGain     bool     `koanf:"normalisation_use_album_gain"`
 	NormalisationPregain          float32  `koanf:"normalisation_pregain"`
 	CrossfadeDuration             int      `koanf:"crossfade_duration"`
+	SkipDebounceMs                int      `koanf:"skip_debounce_ms"`
 	ExternalVolume                bool     `koanf:"external_volume"`
 	ZeroconfEnabled               bool     `koanf:"zeroconf_enabled"`
 	ZeroconfPort                  int      `koanf:"zeroconf_port"`
@@ -82,6 +84,12 @@ type cliConfig struct {
 		Dir       string `koanf:"dir"`
 		SizeLimit string `koanf:"size_limit"`
 	} `koanf:"cache"`
+
+	Metadata struct {
+		Enabled      bool `koanf:"enabled"`
+		ContextSweep bool `koanf:"context_sweep"`
+		MaxTracks    int  `koanf:"max_tracks"`
+	} `koanf:"metadata"`
 
 	Credentials struct {
 		Type        string `koanf:"type"`
@@ -126,6 +134,7 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 		NormalisationUseAlbumGain: c.NormalisationUseAlbumGain,
 		NormalisationPregain:      c.NormalisationPregain,
 		CrossfadeDuration:         c.CrossfadeDuration,
+		SkipDebounce:              time.Duration(c.SkipDebounceMs) * time.Millisecond,
 		ExternalVolume:            c.ExternalVolume,
 		DisableAutoplay:           c.DisableAutoplay,
 
@@ -152,6 +161,9 @@ func (c *cliConfig) toDaemonConfig() *daemon.Config {
 	}
 	// The value is validated in loadCLIConfig, so the error is unreachable here.
 	dc.Cache.SizeLimit, _ = parseSize(c.Cache.SizeLimit)
+	dc.Metadata.Enabled = c.Metadata.Enabled
+	dc.Metadata.ContextSweep = c.Metadata.ContextSweep
+	dc.Metadata.MaxTracks = c.Metadata.MaxTracks
 	dc.Credentials.Type = c.Credentials.Type
 	dc.Credentials.Interactive.CallbackPort = c.Credentials.Interactive.CallbackPort
 	dc.Credentials.SpotifyToken.Username = c.Credentials.SpotifyToken.Username
@@ -208,10 +220,16 @@ func loadCLIConfig(cfg *cliConfig) error {
 		"volume_steps":   100,
 		"initial_volume": 100,
 
+		"skip_debounce_ms": 600,
+
 		"credentials.type": "zeroconf",
 
 		"cache.enabled":    false,
 		"cache.size_limit": "1GB",
+
+		"metadata.enabled":       false,
+		"metadata.context_sweep": false,
+		"metadata.max_tracks":    800,
 
 		"zeroconf_backend": "builtin",
 

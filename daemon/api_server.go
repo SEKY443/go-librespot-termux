@@ -47,8 +47,53 @@ type ConcreteApiServer struct {
 	// authCode is the pending device authorization pairing code.
 	authCode atomic.Pointer[ApiDeviceAuth]
 
-	clients     []*websocket.Conn
+	clients     []*wsClient
 	clientsLock sync.RWMutex
+}
+
+// wsEventQueueSize is how many events a websocket client may fall behind by
+// before the oldest ones start being dropped.
+const wsEventQueueSize = 64
+
+// wsClient is one connected event listener. Events are handed to its own writer
+// goroutine rather than written inline, so that a client which has stopped
+// reading cannot hold up whoever emitted the event — that is the player loop.
+type wsClient struct {
+	conn      *websocket.Conn
+	events    chan *ApiEvent
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *wsClient) close() {
+	c.closeOnce.Do(func() { close(c.done) })
+}
+
+// send queues an event, making room by discarding the oldest when the client is
+// too far behind: a listener that falls behind is better off converging on the
+// current state than replaying a stale backlog.
+func (c *wsClient) send(log librespot.Logger, ev *ApiEvent) bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+
+	for range 2 {
+		select {
+		case c.events <- ev:
+			return true
+		default:
+		}
+
+		select {
+		case <-c.events:
+			log.Warnf("websocket client is not keeping up, dropping an event")
+		default:
+		}
+	}
+
+	return false
 }
 
 var (
@@ -82,7 +127,14 @@ const (
 	ApiRequestTypeToken               ApiRequestType = "token"
 	ApiRequestSetDeviceName           ApiRequestType = "set_device_name"
 	ApiRequestTypeReopenOutput        ApiRequestType = "reopen_output"
+	ApiRequestTypeContextTracks       ApiRequestType = "context_tracks"
 )
+
+// ApiRequestDataContextTracks carries the uri query parameter of the context
+// listing request; the spec generates payloads only for request bodies.
+type ApiRequestDataContextTracks struct {
+	Uri string
+}
 
 type ApiEventType string
 
@@ -101,6 +153,7 @@ const (
 	ApiEventTypeRepeatContext  ApiEventType = "repeat_context"
 	ApiEventTypeShuffleContext ApiEventType = "shuffle_context"
 	ApiEventTypePlaybackReady  ApiEventType = "playback_ready"
+	ApiEventTypePlaybackError  ApiEventType = "playback_error"
 )
 
 type ApiRequest struct {
@@ -292,6 +345,16 @@ type ApiEventDataStopped struct {
 	PlayOrigin string `json:"play_origin"`
 }
 
+type ApiEventDataPlaybackError struct {
+	ContextUri string `json:"context_uri"`
+	Uri        string `json:"uri"`
+	PlayOrigin string `json:"play_origin"`
+	Stage      string `json:"stage"`
+	Kind       string `json:"kind"`
+	Unplayable bool   `json:"unplayable"`
+	Message    string `json:"message"`
+}
+
 type ApiEventDataSeek struct {
 	ContextUri string `json:"context_uri"`
 	Uri        string `json:"uri"`
@@ -371,6 +434,9 @@ func (s *ConcreteApiServer) handleRequest(req ApiRequest, w http.ResponseWriter)
 		case errors.Is(resp.err, ErrTooManyRequests):
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
+		case errors.Is(resp.err, ErrSuperseded), errors.Is(resp.err, ErrLoaderBusy):
+			w.WriteHeader(http.StatusConflict)
+			return
 		case errors.Is(resp.err, ErrBadRequest):
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -432,6 +498,10 @@ func (s *ConcreteApiServer) GetAuthCode(w http.ResponseWriter, _ *http.Request) 
 
 func (s *ConcreteApiServer) GetToken(w http.ResponseWriter, _ *http.Request) {
 	s.handleRequest(ApiRequest{Type: ApiRequestTypeToken}, w)
+}
+
+func (s *ConcreteApiServer) GetContextTracks(w http.ResponseWriter, _ *http.Request, params GetContextTracksParams) {
+	s.handleRequest(ApiRequest{Type: ApiRequestTypeContextTracks, Data: ApiRequestDataContextTracks{Uri: params.Uri}}, w)
 }
 
 func (s *ConcreteApiServer) PlayerResume(w http.ResponseWriter, _ *http.Request) {
@@ -600,10 +670,18 @@ func (s *ConcreteApiServer) GetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// add the client to the list
+	client := &wsClient{
+		conn:   c,
+		events: make(chan *ApiEvent, wsEventQueueSize),
+		done:   make(chan struct{}),
+	}
+
 	s.clientsLock.Lock()
-	s.clients = append(s.clients, c)
+	s.clients = append(s.clients, client)
 	s.clientsLock.Unlock()
+
+	go s.writeEvents(client)
+	defer client.close()
 
 	s.log.Debugf("new websocket client")
 
@@ -617,7 +695,7 @@ func (s *ConcreteApiServer) GetEvents(w http.ResponseWriter, r *http.Request) {
 			// remove the client from the list
 			s.clientsLock.Lock()
 			for i, cc := range s.clients {
-				if cc == c {
+				if cc == client {
 					s.clients = append(s.clients[:i], s.clients[i+1:]...)
 					break
 				}
@@ -659,12 +737,26 @@ func (s *ConcreteApiServer) Emit(ev *ApiEvent) {
 	s.log.Tracef("emitting websocket event: %s", ev.Type)
 
 	for _, client := range s.clients {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		err := wsjson.Write(ctx, client, ev)
-		cancel()
-		if err != nil {
-			// purposely do not propagate this to the caller
-			s.log.WithError(err).Error("failed communicating with websocket client")
+		client.send(s.log, ev)
+	}
+}
+
+// writeEvents delivers one client's events in order. One goroutine per client
+// rather than one per event, because listeners rely on the order they arrive in:
+// will_play before metadata, paused before playing.
+func (s *ConcreteApiServer) writeEvents(client *wsClient) {
+	for {
+		select {
+		case <-client.done:
+			return
+		case ev := <-client.events:
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			err := wsjson.Write(ctx, client.conn, ev)
+			cancel()
+			if err != nil && !s.close.Load() {
+				// purposely do not propagate this to the caller
+				s.log.WithError(err).Error("failed communicating with websocket client")
+			}
 		}
 	}
 }
@@ -683,7 +775,8 @@ func (s *ConcreteApiServer) Close() error {
 	// close all websocket clients
 	s.clientsLock.RLock()
 	for _, client := range s.clients {
-		_ = client.Close(websocket.StatusGoingAway, "")
+		client.close()
+		_ = client.conn.Close(websocket.StatusGoingAway, "")
 	}
 	s.clientsLock.RUnlock()
 

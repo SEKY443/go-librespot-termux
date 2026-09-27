@@ -6,9 +6,45 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestLoadCLIConfigAudioBackend(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, want string
+	}{
+		{"fork default", "initial_volume: 0\n", "pulseaudio"},
+		{"explicit override", "audio_backend: pipe\ninitial_volume: 0\n", "pipe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yml"), []byte(tc.config), 0o600))
+			oldArgs := os.Args
+			t.Cleanup(func() { os.Args = oldArgs })
+			os.Args = []string{"test", "--config_dir", dir}
+			cfg := new(cliConfig)
+			require.NoError(t, loadCLIConfig(cfg))
+			t.Cleanup(func() {
+				if cfg.configLock != nil {
+					require.NoError(t, cfg.configLock.Unlock())
+				}
+			})
+			require.Equal(t, tc.want, cfg.AudioBackend)
+			require.Zero(t, cfg.InitialVolume, "explicit mute must survive default config merging")
+		})
+	}
+}
+
+func TestSkipDebounceMapping(t *testing.T) {
+	var c cliConfig
+	c.SkipDebounceMs = 400
+	require.Equal(t, 400*time.Millisecond, c.toDaemonConfig().SkipDebounce)
+
+	c.SkipDebounceMs = 0
+	require.Zero(t, c.toDaemonConfig().SkipDebounce)
+}
 
 func TestParseSize(t *testing.T) {
 	cases := []struct {

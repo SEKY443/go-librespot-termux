@@ -78,216 +78,105 @@ func NewNarrationSource(ctx context.Context, log librespot.Logger, client *http.
 	return &NarrationSource{Decoder: dec}, nil
 }
 
-// narrationStage tracks where in the intro/main/outro sequence a NarratedSource
-// currently is.
-type narrationStage int
-
-const (
-	stageIntro narrationStage = iota
-	stageMain
-	stageOutro
-	stageDone
-)
-
 // NarratedSource plays a track with the DJ talking around it: an introduction
 // before it and a closing remark after it, either of which may be absent.
 //
 // Playback is sequential rather than mixed, matching the ms_narration_overlapping
 // of 0 the official client reports. Position stays the track's throughout, so it
 // reads as not yet started while the DJ introduces it.
-//
-// Synthesizing a clip is a network round trip that can take a couple of
-// seconds, so intro and outro each arrive on their own channel rather than as
-// an already-resolved source: Read only ever waits on one of them at the
-// point it is actually about to be needed, instead of the caller blocking
-// upfront on synthesis of both before playback (or a reply to whatever
-// command triggered it) can proceed at all. By the time playback reaches the
-// outro, synthesis - kicked off back when the track started - has almost
-// always long since finished, so that wait is normally instant.
 type NarratedSource struct {
 	log librespot.Logger
 
-	stage narrationStage
-
-	hasIntro bool
-	introCh  <-chan librespot.AudioSource
-	intro    librespot.AudioSource
-
-	main librespot.AudioSource
-
-	hasOutro bool
-	outroCh  <-chan librespot.AudioSource
-	outro    librespot.AudioSource
+	// parts are played in order; main is the index of the track among them.
+	parts []librespot.AudioSource
+	main  int
+	cur   int
 }
 
-// NewNarratedSource wraps a track with its narration. introCh and outroCh
-// each deliver exactly one value - the synthesized clip, or nil if there is
-// none or synthesis failed - and may themselves be nil when hasIntro/hasOutro
-// is false. hasIntro/hasOutro are known synchronously from track metadata
-// (see NoCrossfade), independent of whether synthesis itself later succeeds.
-func NewNarratedSource(log librespot.Logger, hasIntro bool, introCh <-chan librespot.AudioSource,
-	main librespot.AudioSource, hasOutro bool, outroCh <-chan librespot.AudioSource) *NarratedSource {
-	s := &NarratedSource{
-		log:      log,
-		hasIntro: hasIntro,
-		introCh:  introCh,
-		main:     main,
-		hasOutro: hasOutro,
-		outroCh:  outroCh,
+// NewNarratedSource wraps a track with its narration. Either clip may be nil.
+func NewNarratedSource(log librespot.Logger, intro, main, outro librespot.AudioSource) *NarratedSource {
+	s := &NarratedSource{log: log}
+
+	if intro != nil {
+		s.parts = append(s.parts, intro)
 	}
 
-	if !hasIntro {
-		s.stage = stageMain
+	s.main = len(s.parts)
+	s.parts = append(s.parts, main)
+
+	if outro != nil {
+		s.parts = append(s.parts, outro)
 	}
 
 	return s
 }
 
 func (s *NarratedSource) Read(p []float32) (int, error) {
-	for {
-		src, ok := s.current()
-		if !ok {
-			return 0, io.EOF
-		}
-
-		n, err := src.Read(p)
+	for s.cur < len(s.parts) {
+		n, err := s.parts[s.cur].Read(p)
 
 		switch {
 		case err == nil:
 			return n, nil
 
 		case errors.Is(err, io.EOF):
-			s.advance()
+			s.cur++
 			if n > 0 {
+				if s.cur >= len(s.parts) {
+					return n, io.EOF
+				}
 				return n, nil
 			}
 
 		default:
 			// A failing track is a real error, but a failing narration clip is
 			// not: drop it and carry on rather than losing the music.
-			if s.stage == stageMain {
+			if s.cur == s.main {
 				return n, err
 			}
 
 			s.log.WithError(err).Warnf("narration playback failed, skipping it")
-			s.advance()
+			s.cur++
 			if n > 0 {
 				return n, nil
 			}
 		}
 	}
+
+	return 0, io.EOF
 }
 
-// EnsureReady blocks until whatever Read would return first is resolved -
-// waiting out a still-synthesizing intro here, rather than leaving that wait
-// for the audio output's first Read call.
-//
-// This matters because of how the pulseaudio backend's first Start() call
-// works (see third_party/pulse/playback.go): it uncorks the server-side
-// stream and only then waits for the reader to produce the first buffer.
-// PulseAudio treats a slow-arriving first buffer as an underrun right at
-// stream startup, which on at least one real backend (see driver-pulseaudio.go's
-// PlaybackLatency comment) has been observed to audibly repeat the
-// beginning of playback once data does arrive, rather than merely a longer
-// silence. A synchronous Read taking that first hit is a much larger
-// problem than the same wait happening here, before the source is ever
-// handed to the output layer.
-//
-// Safe to skip - Read would resolve the same pending channel itself, just
-// too late for the output layer's sake. Call it once, right before handing
-// the source to the output layer (e.g. Player.SetPrimaryStream).
-func (s *NarratedSource) EnsureReady() {
-	s.current()
-}
-
-// current resolves (receiving from its channel, blocking if synthesis is
-// still in flight) and returns the source for the current stage, skipping
-// past any stage that turns out to have nothing to play.
-func (s *NarratedSource) current() (librespot.AudioSource, bool) {
-	for {
-		switch s.stage {
-		case stageIntro:
-			if s.intro == nil {
-				s.intro = <-s.introCh
-			}
-			if s.intro == nil {
-				s.stage = stageMain
-				continue
-			}
-			return s.intro, true
-
-		case stageMain:
-			return s.main, true
-
-		case stageOutro:
-			if s.outro == nil {
-				s.outro = <-s.outroCh
-			}
-			if s.outro == nil {
-				s.stage = stageDone
-				continue
-			}
-			return s.outro, true
-
-		default:
-			return nil, false
-		}
-	}
-}
-
-func (s *NarratedSource) advance() {
-	switch s.stage {
-	case stageIntro:
-		s.stage = stageMain
-	case stageMain:
-		if s.hasOutro {
-			s.stage = stageOutro
-		} else {
-			s.stage = stageDone
-		}
-	case stageOutro:
-		s.stage = stageDone
-	}
-}
-
-// SetPositionMs seeks the track, abandoning an introduction still playing (or
-// still synthesizing): a listener who scrubs wants the music. The closing
-// remark still follows, since it belongs to the end of the track.
+// SetPositionMs seeks the track, abandoning an introduction still playing: a
+// listener who scrubs wants the music. The closing remark still follows, since
+// it belongs to the end of the track.
 func (s *NarratedSource) SetPositionMs(pos int64) error {
-	if s.stage == stageIntro {
-		s.stage = stageMain
+	if s.cur < s.main {
+		s.cur = s.main
 	}
 
-	return s.main.SetPositionMs(pos)
+	return s.parts[s.main].SetPositionMs(pos)
 }
 
 // NoCrossfade keeps a closing remark out of the crossfade reserve, which would
 // otherwise spend the whole of it fading out. A source with only an introduction
 // ends in ordinary music and still crossfades.
 func (s *NarratedSource) NoCrossfade() bool {
-	return s.hasOutro
+	return s.main < len(s.parts)-1
 }
 
 func (s *NarratedSource) PositionMs() int64 {
-	return s.main.PositionMs()
+	return s.parts[s.main].PositionMs()
 }
 
 func (s *NarratedSource) Close() error {
 	var err error
-	closeIfCloser := func(src librespot.AudioSource) {
-		if src == nil {
-			return
-		}
-		if closer, ok := src.(io.Closer); ok && closer != nil {
+	for _, part := range s.parts {
+		if closer, ok := part.(io.Closer); ok && closer != nil {
 			if cerr := closer.Close(); cerr != nil {
 				err = cerr
 			}
 		}
 	}
-
-	closeIfCloser(s.intro)
-	closeIfCloser(s.main)
-	closeIfCloser(s.outro)
 
 	return err
 }

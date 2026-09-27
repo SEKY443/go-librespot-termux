@@ -1,10 +1,11 @@
 package daemon
 
 import (
-	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"net"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 	"github.com/devgianlu/go-librespot/player"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
+	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/tracks"
+	"google.golang.org/protobuf/proto"
 )
 
 type State struct {
@@ -231,12 +234,71 @@ func (p *AppPlayer) initState() {
 	p.state.reset()
 }
 
+// maxAutoplaySeedTracks bounds how many recently played tracks are offered to
+// the autoplay endpoint as the seed for a station.
+const maxAutoplaySeedTracks = 50
+
+// invalidateUpcoming forgets whatever was going to play next: any prefetch
+// still running has its result thrown away rather than switched or faded into.
+// Only the prefetch counter moves — a track load in flight is still wanted.
+func (p *AppPlayer) invalidateUpcoming() {
+	p.prefetchGen++
+	p.clearUpcoming()
+}
+
+// clearUpcoming drops the prefetched stream without touching the generation,
+// for callers that have already moved it on themselves.
+func (p *AppPlayer) clearUpcoming() {
+	p.secondaryStream = nil
+	p.secondarySource = nil
+	p.player.SetSecondaryStream(nil)
+}
+
+// publishSnapshot reports where the track list now stands: what is playing and
+// what surrounds it.
+func (p *AppPlayer) publishSnapshot(snap *tracks.Snapshot) {
+	p.state.player.Track = snap.Current
+	p.state.player.Index = snap.Index
+	p.publishUpcoming(snap)
+}
+
+// publishUpcoming reports only what surrounds the current track, leaving the
+// track itself alone — it carries metadata from the media, which a fresh one
+// off the track list would not have.
+func (p *AppPlayer) publishUpcoming(snap *tracks.Snapshot) {
+	p.state.player.PrevTracks = snap.Prev
+	p.state.player.NextTracks = snap.Next
+
+	// Every path that moves the window — load, transfer, skip, queue edit,
+	// shuffle — lands here, so this is where its metadata is asked for.
+	p.scheduleMetaPrefetch()
+}
+
 // statePutMinInterval is the minimum spacing between connect-state PUTs.
 const statePutMinInterval = 200 * time.Millisecond
 
-// updateState PUTs the latest connect-state, at most one per statePutMinInterval: immediately
-// and synchronously when the budget allows, else deferred to the timer so a burst coalesces.
-func (p *AppPlayer) updateState(ctx context.Context) {
+// statePutMaxBackoff caps how long a failing connect-state push waits before
+// being resent. State is coalesced, so a long wait costs nothing but freshness.
+const statePutMaxBackoff = 30 * time.Second
+
+// stateRetryDelay is how long to hold a failed connect-state push before
+// resending it: the cooldown the backend asked for, or an exponential backoff
+// from the coalescing interval. Jittered downwards so that many devices coming
+// back from one outage do not resend in lockstep.
+func (p *AppPlayer) stateRetryDelay(err error) time.Duration {
+	var rl *spclient.RateLimitedError
+	if errors.As(err, &rl) {
+		return rl.RetryAfter
+	}
+
+	d := min(statePutMinInterval<<min(p.stateRetries, 8), statePutMaxBackoff)
+	return d - rand.N(d/5)
+}
+
+// updateState hands the latest connect-state to the push lane, at most one per
+// statePutMinInterval: immediately when the budget allows, else deferred to the
+// timer so a burst coalesces.
+func (p *AppPlayer) updateState() {
 	p.stateDirty = true
 	if p.statePutScheduled {
 		return
@@ -246,7 +308,7 @@ func (p *AppPlayer) updateState(ctx context.Context) {
 		p.stateTimer.Reset(wait)
 		return
 	}
-	p.flushState(ctx)
+	p.flushState()
 }
 
 func contextMetadata(fromCommand, fromResolver map[string]string) map[string]string {
@@ -256,11 +318,26 @@ func contextMetadata(fromCommand, fromResolver map[string]string) map[string]str
 	return metadata
 }
 
-func (p *AppPlayer) putConnectState(ctx context.Context, reason connectpb.PutStateReason) error {
-	if reason == connectpb.PutStateReason_BECAME_INACTIVE {
-		return p.sess.Spclient().PutConnectStateInactive(ctx, p.spotConnId, false)
+// pushState hands the current connect state to the push lane. Runs on the Run
+// goroutine, and never blocks: the state is marshalled here so that the lane
+// carries bytes rather than protos this loop goes on mutating.
+func (p *AppPlayer) pushState(reason connectpb.PutStateReason) {
+	p.stateSeq++
+	push := statePush{seq: p.stateSeq, reason: reason, spotConnId: p.spotConnId}
+
+	if reason != connectpb.PutStateReason_BECAME_INACTIVE {
+		body, err := proto.Marshal(p.buildStateRequest(reason))
+		if err != nil {
+			p.app.log.WithError(err).Error("failed marshalling connect state")
+			return
+		}
+		push.body = body
 	}
 
+	p.statePush.submit(push)
+}
+
+func (p *AppPlayer) buildStateRequest(reason connectpb.PutStateReason) *connectpb.PutStateRequest {
 	putStateReq := &connectpb.PutStateRequest{
 		ClientSideTimestamp: uint64(time.Now().UnixMilli()),
 		MemberType:          connectpb.MemberType_CONNECT_STATE,
@@ -285,17 +362,38 @@ func (p *AppPlayer) putConnectState(ctx context.Context, reason connectpb.PutSta
 		putStateReq.LastCommandSentByDeviceId = p.state.lastCommand.SentByDeviceId
 	}
 
-	// finally send the state update
-	cluster, err := p.sess.Spclient().PutConnectState(ctx, p.spotConnId, putStateReq)
-	if err != nil {
-		return err
+	return putStateReq
+}
+
+// applyStatePushResult folds the outcome of a push back into the state. Runs on
+// the Run goroutine.
+func (p *AppPlayer) applyStatePushResult(res statePushResult) {
+	if res.publicIp != "" {
+		p.state.device.PublicIp = res.publicIp
 	}
 
-	if device := cluster.Device[p.app.deviceId]; device != nil && device.PublicIp != "" {
-		p.state.device.PublicIp = device.PublicIp
+	if res.err != nil {
+		p.app.log.WithError(res.err).Errorf("failed put state because %s", res.reason)
+
+		// Only the newest push is worth resending; an older one describes state
+		// that has already been superseded.
+		if res.seq == p.stateSeq {
+			p.stateDirty = true
+			p.stateRetries++
+			p.statePutScheduled = true
+			p.stateTimer.Reset(p.stateRetryDelay(res.err))
+		}
+		return
 	}
 
-	return nil
+	p.stateRetries = 0
+
+	// Any push registers the device, so playback readiness does not hinge on
+	// the initial one in particular having got through.
+	if !p.hasInitialConnectState {
+		p.hasInitialConnectState = true
+		p.notifyPlaybackReadyIfNeeded()
+	}
 }
 
 // coverImageSizes maps the ProvidedTrack metadata keys Spotify's clients look

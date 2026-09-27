@@ -145,6 +145,7 @@ var endpointMethods = map[string][]string{
 	"/player/shuffle_context": {http.MethodPost},
 	"/player/add_to_queue":    {http.MethodPost},
 	"/player/output":          {http.MethodPost},
+	"/context/tracks":         {http.MethodGet},
 }
 
 func TestApiRejectsWrongMethod(t *testing.T) {
@@ -242,22 +243,29 @@ func TestApiStatus(t *testing.T) {
 func TestApiStatusWireFormat(t *testing.T) {
 	coverUrl := "https://i.scdn.co/image/xxx"
 	bitrate, sampleRate, bitDepth := 160, 44100, 16
+	playOrigin := "go-librespot"
+	originDeviceId := "def"
+	contextUri := "spotify:playlist:xxx"
+	contextName := "Some Playlist"
 
 	ts := newTestServer(t, func(ApiRequest) (any, error) {
 		return &ApiStatus{
-			Username:       "someone",
-			DeviceId:       "abc",
-			DeviceType:     "COMPUTER",
-			DeviceName:     "test device",
-			PlayOrigin:     "go-librespot",
-			Stopped:        false,
-			Paused:         false,
-			Buffering:      false,
-			Volume:         42,
-			VolumeSteps:    100,
-			RepeatContext:  false,
-			RepeatTrack:    false,
-			ShuffleContext: false,
+			Username:           "someone",
+			DeviceId:           "abc",
+			DeviceType:         "COMPUTER",
+			DeviceName:         "test device",
+			PlayOrigin:         &playOrigin,
+			PlayOriginDeviceId: &originDeviceId,
+			ContextUri:         &contextUri,
+			ContextName:        &contextName,
+			Stopped:            false,
+			Paused:             false,
+			Buffering:          false,
+			Volume:             42,
+			VolumeSteps:        100,
+			RepeatContext:      false,
+			RepeatTrack:        false,
+			ShuffleContext:     false,
 			Track: &ApiTrack{
 				Uri:           "spotify:track:xxx",
 				Name:          "Some Song",
@@ -286,6 +294,9 @@ func TestApiStatusWireFormat(t *testing.T) {
 		"device_type": "COMPUTER",
 		"device_name": "test device",
 		"play_origin": "go-librespot",
+		"play_origin_device_id": "def",
+		"context_uri": "spotify:playlist:xxx",
+		"context_name": "Some Playlist",
 		"stopped": false,
 		"paused": false,
 		"buffering": false,
@@ -324,6 +335,12 @@ func TestApiStatusWireFormatNulls(t *testing.T) {
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(body(t, resp)), &got))
+
+	for _, field := range []string{"play_origin", "play_origin_device_id", "context_uri", "context_name"} {
+		value, present := got[field]
+		require.True(t, present, "%s must be present", field)
+		require.Nil(t, value, "%s must be null", field)
+	}
 
 	track, ok := got["track"].(map[string]any)
 	require.True(t, ok)
@@ -660,4 +677,52 @@ func TestApiEventsWebsocketReceivesEmittedEvents(t *testing.T) {
 	_, raw, err := conn.Read(ctx)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"type":"volume","data":{"value":55,"max":100}}`, string(raw))
+}
+
+// A listener that stops reading must not hold up whoever emitted the event —
+// that caller is the player loop.
+func TestApiEmitDoesNotBlockOnAStalledClient(t *testing.T) {
+	s := &ConcreteApiServer{log: &librespot.NullLogger{}}
+	client := &wsClient{
+		events: make(chan *ApiEvent, wsEventQueueSize),
+		done:   make(chan struct{}),
+	}
+
+	s.clientsLock.Lock()
+	s.clients = append(s.clients, client)
+	s.clientsLock.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range uint32(wsEventQueueSize * 4) {
+			s.Emit(&ApiEvent{Type: ApiEventTypeVolume, Data: ApiEventDataVolume{Value: i, Max: 100}})
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Emit blocked on a client that never reads")
+	}
+
+	require.Len(t, client.events, wsEventQueueSize, "the queue is bounded")
+
+	// The events kept are the most recent ones: a listener that fell behind
+	// converges on the current state rather than replaying a stale backlog.
+	ev := <-client.events
+	require.Equal(t, uint32(wsEventQueueSize*3), ev.Data.(ApiEventDataVolume).Value)
+}
+
+// Once a client is gone, sending to it reports failure instead of filling a
+// queue nobody will drain.
+func TestApiSendToClosedClientGivesUp(t *testing.T) {
+	client := &wsClient{
+		events: make(chan *ApiEvent, 1),
+		done:   make(chan struct{}),
+	}
+	client.close()
+	client.close() // idempotent: both GetEvents and Close reach for it
+
+	require.False(t, client.send(&librespot.NullLogger{}, &ApiEvent{Type: ApiEventTypeVolume}))
 }
