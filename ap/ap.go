@@ -36,6 +36,11 @@ const pongAckInterval = 120 * time.Second
 // rebuilds the session from scratch.
 const reconnectMaxElapsedTime = 30 * time.Second
 
+// handshakeTimeout bounds the key exchange, challenge and authentication when the caller's
+// context has no deadline: an accesspoint that stops answering mid-handshake would otherwise
+// hold the connection until it drops it, minutes later.
+var handshakeTimeout = 30 * time.Second
+
 var ErrAccesspointClosed = errors.New("accesspoint closed")
 
 type AccesspointLoginError struct {
@@ -237,10 +242,12 @@ func (ap *Accesspoint) connect(ctx context.Context, creds *pb.LoginCredentials) 
 		return err
 	}
 
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = ap.conn.SetDeadline(deadline)
-		defer func() { _ = ap.conn.SetDeadline(time.Time{}) }()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(handshakeTimeout)
 	}
+	_ = ap.conn.SetDeadline(deadline)
+	defer func() { _ = ap.conn.SetDeadline(time.Time{}) }()
 
 	// perform key exchange with diffiehellman
 	exchangeData, err := ap.performKeyExchange()

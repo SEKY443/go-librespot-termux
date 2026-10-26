@@ -23,7 +23,9 @@ components:
         - uri
         - name
         - artist_names
+        - artist_uris
         - album_name
+        - album_uri
         - album_cover_url
         - position
         - duration
@@ -48,8 +50,20 @@ components:
           items:
             description: Artist name
             type: string
+        artist_uris:
+          description: >-
+            Artist URIs, in the order of artist_names; empty for episodes
+          type: array
+          items:
+            description: Artist URI
+            type: string
         album_name:
           description: Album name
+          type: string
+        album_uri:
+          description: >-
+            Album URI, or the show URI for episodes (mirroring album_name);
+            empty when unknown
           type: string
         album_cover_url:
           description: Album cover URL
@@ -244,6 +258,248 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/contextTrackItem'
+    libraryPlaylist:
+      x-go-name: ApiLibraryPlaylist
+      description: A playlist in the user's library
+      type: object
+      required:
+        - uri
+        - name
+        - description
+        - owner_username
+        - length
+        - image_url
+        - collaborative
+        - can_edit
+        - folder
+      properties:
+        uri:
+          description: Playlist URI
+          type: string
+        name:
+          description: Playlist name
+          type: string
+        description:
+          description: Playlist description, empty when it has none
+          type: string
+        owner_username:
+          description: Username of the playlist owner, "spotify" for editorial playlists
+          type: string
+        length:
+          description: Number of items in the playlist
+          type: integer
+          format: int32
+        image_url:
+          description: >-
+            Cover image URL, null when the playlist has no explicit picture
+            (the Spotify apps then render a mosaic of its first album covers)
+          type: string
+          nullable: true
+        collaborative:
+          description: Whether the playlist is collaborative
+          type: boolean
+        can_edit:
+          description: >-
+            Whether the user may add items to the playlist, true for their own
+            and for collaborative playlists
+          type: boolean
+        folder:
+          description: >-
+            Names of the folders containing the playlist, outermost first;
+            empty for a playlist at the top level of the library
+          type: array
+          items:
+            type: string
+    libraryPlaylists:
+      x-go-name: ApiLibraryPlaylists
+      description: A page of the user's library playlists
+      type: object
+      required: [ total, offset, limit, items ]
+      properties:
+        total:
+          description: Number of playlists in the library
+          type: integer
+        offset:
+          description: Index of the first returned playlist
+          type: integer
+        limit:
+          description: Maximum number of playlists requested
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/libraryPlaylist'
+    libraryAlbum:
+      x-go-name: ApiLibraryAlbum
+      description: An album saved in the user's library
+      type: object
+      required: [ uri, name, artist_names, year, image_url ]
+      properties:
+        uri:
+          description: Album URI
+          type: string
+        name:
+          description: Album name, empty when its metadata could not be read
+          type: string
+        artist_names:
+          description: Names of the album artists
+          type: array
+          items:
+            type: string
+        year:
+          description: Release year, zero when unknown
+          type: integer
+        image_url:
+          description: Cover image URL, null when unknown
+          type: string
+          nullable: true
+    libraryAlbums:
+      x-go-name: ApiLibraryAlbums
+      description: A page of the user's saved albums
+      type: object
+      required: [ total, offset, limit, items ]
+      properties:
+        total:
+          description: Number of saved albums
+          type: integer
+        offset:
+          description: Index of the first returned album
+          type: integer
+        limit:
+          description: Maximum number of albums requested
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/libraryAlbum'
+    libraryArtist:
+      x-go-name: ApiLibraryArtist
+      description: An artist the user follows
+      type: object
+      required: [ uri, name, image_url ]
+      properties:
+        uri:
+          description: Artist URI
+          type: string
+        name:
+          description: Artist name, empty when its metadata could not be read
+          type: string
+        image_url:
+          description: Portrait image URL, null when unknown
+          type: string
+          nullable: true
+    libraryArtists:
+      x-go-name: ApiLibraryArtists
+      description: A page of the artists the user follows
+      type: object
+      required: [ total, offset, limit, items ]
+      properties:
+        total:
+          description: Number of followed artists
+          type: integer
+        offset:
+          description: Index of the first returned artist
+          type: integer
+        limit:
+          description: Maximum number of artists requested
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/libraryArtist'
+    likedState:
+      x-go-name: ApiLikedState
+      description: Whether a track is in the user's Liked Songs
+      type: object
+      required: [ uri, liked ]
+      properties:
+        uri:
+          description: Track URI
+          type: string
+        liked:
+          description: Whether the track is in Liked Songs
+          type: boolean
+    likedStates:
+      x-go-name: ApiLikedStates
+      description: Liked Songs membership of the requested tracks
+      type: object
+      required: [ items ]
+      properties:
+        items:
+          description: One entry per requested URI, in request order
+          type: array
+          items:
+            $ref: '#/components/schemas/likedState'
+    setLiked:
+      x-go-name: ApiSetLiked
+      description: A save to or remove from Liked Songs payload
+      type: object
+      required: [ uris, liked ]
+      properties:
+        uris:
+          description: Track URIs, 1 to 50
+          type: array
+          items:
+            type: string
+        liked:
+          description: True to add the tracks to Liked Songs, false to remove them
+          type: boolean
+    playlistRemoveTrack:
+      x-go-name: ApiPlaylistRemoveTrack
+      description: A remove from playlist payload
+      type: object
+      required: [ playlist_uri, uri ]
+      properties:
+        playlist_uri:
+          description: URI of the playlist to remove from
+          type: string
+        uri:
+          description: URI of the track or episode to remove
+          type: string
+        position:
+          description: >-
+            Position of the item to remove, as listed by /context/tracks; the
+            item there must be uri. Without it the first occurrence of uri is
+            removed.
+          type: integer
+          minimum: 0
+    playlistContainsState:
+      x-go-name: ApiPlaylistContainsState
+      description: Whether a playlist holds an item
+      type: object
+      required: [ uri, contained ]
+      properties:
+        uri:
+          description: Track or episode URI
+          type: string
+        contained:
+          description: Whether the playlist holds the item at least once
+          type: boolean
+    playlistContains:
+      x-go-name: ApiPlaylistContains
+      description: Membership of the requested items in a playlist
+      type: object
+      required: [ items ]
+      properties:
+        items:
+          description: One entry per requested URI, in request order
+          type: array
+          items:
+            $ref: '#/components/schemas/playlistContainsState'
+    playlistAddTracks:
+      x-go-name: ApiPlaylistAddTracks
+      description: An append to playlist payload
+      type: object
+      required: [ playlist_uri, uris ]
+      properties:
+        playlist_uri:
+          description: URI of the playlist to append to
+          type: string
+        uris:
+          description: Track or episode URIs to append, 1 to 50
+          type: array
+          items:
+            type: string
     root:
       x-go-name: ApiRoot
       description: API reachability and playback readiness
@@ -518,9 +774,10 @@ paths:
 
         Tracks and episodes are both listed, so shows enumerate to their
         episodes. Long contexts are truncated to metadata.max_tracks. Listings
-        are reused for five minutes, so an edit made to a playlist within that
-        window is not reflected. Requires metadata.enabled; responds 404
-        otherwise.
+        are reused for five minutes, so an edit made elsewhere within that
+        window is not reflected; edits made through /library/liked and
+        /library/playlists/add_tracks are. Requires metadata.enabled; responds
+        404 otherwise.
       parameters:
         - name: uri
           in: query
@@ -539,6 +796,271 @@ paths:
           description: The uri does not name a listable context
         404:
           description: The metadata cache is disabled
+  /library/playlists:
+    get:
+      operationId: getLibraryPlaylists
+      description: >-
+        List the playlists in the user's library (the rootlist), in the order
+        the user arranged them, including followed and Spotify-owned
+        playlists. Folders are flattened: each playlist carries the names of
+        the folders it sits in. The listing is fetched through the internal
+        playlist service, not the rate-limited public Web API, and is fetched
+        fresh on every call. Liked Songs is not part of the rootlist; list it
+        through /context/tracks with the spotify:collection:tracks URI.
+      parameters:
+        - name: offset
+          in: query
+          required: false
+          description: Index of the first playlist to return
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          x-go-type-skip-optional-pointer: true
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of playlists to return, from 1 to 500
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+          x-go-type-skip-optional-pointer: true
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/libraryPlaylists'
+        204:
+          description: No active session
+        400:
+          description: The offset or limit is out of range
+  /library/albums:
+    get:
+      operationId: getLibraryAlbums
+      description: >-
+        List the albums saved in the user's library, most recently saved
+        first. The list comes from the internal collection service and the
+        album details from extended metadata, not the rate-limited public Web
+        API.
+      parameters:
+        - name: offset
+          in: query
+          required: false
+          description: Index of the first item to return
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          x-go-type-skip-optional-pointer: true
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of items to return, from 1 to 500
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+          x-go-type-skip-optional-pointer: true
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/libraryAlbums'
+        204:
+          description: No active session
+        400:
+          description: The offset or limit is out of range
+  /library/artists:
+    get:
+      operationId: getLibraryArtists
+      description: >-
+        List the artists the user follows, most recently followed first. The
+        list comes from the internal collection service and the artist
+        details from extended metadata, not the rate-limited public Web API.
+        Play an artist, or list its tracks through /context/tracks, with its
+        URI.
+      parameters:
+        - name: offset
+          in: query
+          required: false
+          description: Index of the first item to return
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          x-go-type-skip-optional-pointer: true
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of items to return, from 1 to 500
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+          x-go-type-skip-optional-pointer: true
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/libraryArtists'
+        204:
+          description: No active session
+        400:
+          description: The offset or limit is out of range
+  /library/liked:
+    get:
+      operationId: getLiked
+      description: >-
+        Tell whether tracks are in the user's Liked Songs, asking the
+        collection service for just these tracks, so changes made on other
+        devices show at once.
+      parameters:
+        - name: uris
+          in: query
+          required: true
+          description: Comma-separated track URIs, 1 to 50
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/likedStates'
+        204:
+          description: No active session
+        400:
+          description: The uris are missing, too many, or not track URIs
+    post:
+      operationId: setLiked
+      description: >-
+        Save tracks to, or remove them from, the user's Liked Songs through the
+        internal collection service.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/setLiked'
+      responses:
+        200:
+          description: Successful response
+        204:
+          description: No active session
+        400:
+          description: The uris are missing, too many, or not track URIs
+  /library/playlists/add_tracks:
+    post:
+      operationId: playlistAddTracks
+      description: >-
+        Append tracks or episodes to the end of a playlist the user may edit
+        (see can_edit in /library/playlists). The change is based on the
+        playlist's current revision and retried once if the playlist changed
+        in between.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/playlistAddTracks'
+      responses:
+        200:
+          description: Successful response
+        204:
+          description: No active session
+        400:
+          description: >-
+            The playlist_uri is not a playlist URI, or the uris are missing,
+            too many, or not track or episode URIs
+        403:
+          description: The user may not edit the playlist
+        404:
+          description: The playlist does not exist
+        409:
+          description: The playlist kept changing while appending
+  /library/playlists/remove_track:
+    post:
+      operationId: playlistRemoveTrack
+      description: >-
+        Remove one item from a playlist the user may edit. Playlists may hold
+        an item more than once, so clients that list the playlist pass the
+        position of the entry to remove; the change is based on the
+        playlist's current revision and retried once if it changed in
+        between.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/playlistRemoveTrack'
+      responses:
+        200:
+          description: Successful response
+        204:
+          description: No active session
+        400:
+          description: The playlist_uri or uri is not valid, or the position is negative
+        403:
+          description: The user may not edit the playlist
+        404:
+          description: The playlist does not exist or does not hold uri
+        409:
+          description: >-
+            The item at position is no longer uri, or the playlist kept
+            changing; list the playlist again
+  /library/playlists/contains:
+    get:
+      operationId: playlistContains
+      description: >-
+        Tell whether a playlist already holds items, for example to ask
+        before adding a duplicate. The playlist is read fresh on every call.
+      parameters:
+        - name: playlist_uri
+          in: query
+          required: true
+          description: URI of the playlist
+          schema:
+            type: string
+        - name: uris
+          in: query
+          required: true
+          description: Comma-separated track or episode URIs, 1 to 50
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/playlistContains'
+        204:
+          description: No active session
+        400:
+          description: The playlist_uri or the uris are not valid
+        403:
+          description: The user may not read the playlist
+        404:
+          description: The playlist does not exist
   /player/play:
     post:
       operationId: playerPlay
@@ -643,7 +1165,9 @@ paths:
   /player/volume:
     get:
       operationId: playerGetVolume
-      description: Get player volume
+      description: |
+        Get player volume. Without a session, the volume the next session starts from
+        when the volume is external.
       responses:
         200:
           description: Returns the player volume settings
@@ -653,7 +1177,9 @@ paths:
                 $ref: '#/components/schemas/volume'
     post:
       operationId: playerSetVolume
-      description: Set player volume
+      description: |
+        Set player volume. Accepted without a session too: the volume is kept, and
+        with external volume every new session starts from it.
       requestBody:
         required: true
         content:

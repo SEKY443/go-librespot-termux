@@ -29,8 +29,28 @@ type State struct {
 	tracks  *tracks.List
 	queueID uint64
 
-	lastCommand           *dealer.RequestPayload
-	lastTransferTimestamp int64
+	lastCommand *dealer.RequestPayload
+
+	// activationTimestamp gates cluster updates: one naming another device is
+	// only taken as playback moving away when its player state is newer than
+	// this. Every command that makes this device active sets it to the state
+	// of the device that held the session, which can go on reporting that
+	// state for a moment: a stale update arriving after the command (#107),
+	// or librespot reporting itself once more on its way to going inactive.
+	activationTimestamp int64
+
+	// lastClusterTimestamp is the player state timestamp of the latest cluster
+	// update seen while not active: the state of whoever holds the session.
+	lastClusterTimestamp int64
+}
+
+// takeOver makes the device active for a play. Coming from inactive, that
+// activates it over whoever held the session, as a transfer does.
+func (s *State) takeOver() {
+	if !s.active {
+		s.activationTimestamp = s.lastClusterTimestamp
+	}
+	s.setActive(true)
 }
 
 // Set the IsPaused flag, and also the PlaybackSpeed as well.
@@ -181,11 +201,19 @@ func deviceAddressMask() string {
 }
 
 func (p *AppPlayer) initState() {
+	// The first state pushed to Spotify must carry the real level: a controller
+	// steps its volume buttons from what it was shown. Without external volume
+	// the session sets its own once the dealer connects.
+	volume := uint32(player.MaxStateVolume)
+	if p.app.cfg.ExternalVolume {
+		volume = p.app.sessionVolume()
+	}
+
 	p.state = &State{
 		lastCommand: nil,
 		device: &connectpb.DeviceInfo{
 			CanPlay:               true,
-			Volume:                player.MaxStateVolume,
+			Volume:                volume,
 			Name:                  p.app.cfg.DeviceName,
 			DeviceId:              p.app.deviceId,
 			DeviceType:            p.app.deviceType,

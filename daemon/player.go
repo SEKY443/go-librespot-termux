@@ -24,6 +24,7 @@ import (
 	"github.com/devgianlu/go-librespot/player"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	"github.com/devgianlu/go-librespot/session"
+	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/tracks"
 )
 
@@ -257,10 +258,19 @@ func (p *AppPlayer) handleDealerMessage(msg dealer.Message) error {
 			return fmt.Errorf("failed unmarshalling ClusterUpdate: %w", err)
 		}
 
-		stopBeingActive := p.state.active && clusterUpdate.Cluster.ActiveDeviceId != p.app.deviceId && clusterUpdate.Cluster.PlayerState.Timestamp > p.state.lastTransferTimestamp
+		if !p.state.active {
+			p.state.lastClusterTimestamp = clusterUpdate.Cluster.GetPlayerState().GetTimestamp()
+		}
+
+		otherActive := p.state.active && clusterUpdate.Cluster.ActiveDeviceId != p.app.deviceId
+		stopBeingActive := otherActive && clusterUpdate.Cluster.PlayerState.Timestamp > p.state.activationTimestamp
 
 		// We are still the active device, do not quit
 		if !stopBeingActive {
+			if otherActive {
+				p.app.log.Debugf("ignoring cluster update naming %s active: its state predates this device's activation",
+					clusterUpdate.Cluster.ActiveDeviceId)
+			}
 			return nil
 		}
 
@@ -291,6 +301,23 @@ func singleTrackContext(track *connectpb.ContextTrack) *connectpb.Context {
 	default:
 		return nil
 	}
+}
+
+// emptyContext reports whether a transferred context names nothing to play: no
+// uri, no url, and no page holding tracks or saying where to fetch them. A
+// client with nothing loaded sends one of those rather than no context at all.
+func emptyContext(ctx *connectpb.Context) bool {
+	if ctx.GetUri() != "" || ctx.GetUrl() != "" {
+		return false
+	}
+
+	for _, page := range ctx.GetPages() {
+		if len(page.Tracks) > 0 || page.PageUrl != "" || page.NextPageUrl != "" {
+			return false
+		}
+	}
+
+	return true
 }
 
 // trackOnlyContext is singleTrackContext with the track already in its only
@@ -387,11 +414,11 @@ func (p *AppPlayer) handlePlayerCommand(req dealer.RequestPayload) error {
 		if err := proto.Unmarshal(req.Command.Data, &transferState); err != nil {
 			return fmt.Errorf("failed unmarshalling TransferState: %w", err)
 		}
-		p.state.lastTransferTimestamp = transferState.Playback.Timestamp
+		p.state.activationTimestamp = transferState.Playback.Timestamp
 
 		// A queued or autoplayed track is handed over on its own, with no
 		// context to take it from. Play it as a context of one.
-		if transferState.CurrentSession.Context == nil {
+		if emptyContext(transferState.CurrentSession.Context) {
 			p.app.log.Debugf("transfer command without a context, falling back to the current track")
 
 			transferState.CurrentSession.Context = singleTrackContext(transferState.Playback.CurrentTrack)
@@ -446,7 +473,7 @@ func (p *AppPlayer) handlePlayerCommand(req dealer.RequestPayload) error {
 		// dereferenced here; the loader then plays it from the top.
 		p.state.player.Track = nil
 		if current := transferState.Playback.CurrentTrack; singleTrackContext(current) != nil {
-			contextSpotType := librespot.InferSpotifyIdTypeFromContextUri(p.state.player.ContextUri)
+			contextSpotType := librespot.InferSpotifyIdTypeFromContext(transferState.CurrentSession.Context)
 			p.state.player.Track = librespot.ContextTrackToProvidedTrack(contextSpotType, current)
 		}
 		p.state.player.PrevTracks = nil
@@ -465,7 +492,7 @@ func (p *AppPlayer) handlePlayerCommand(req dealer.RequestPayload) error {
 
 		return nil
 	case "play":
-		p.state.setActive(true)
+		p.state.takeOver()
 
 		p.state.player.PlayOrigin = req.Command.PlayOrigin
 		p.state.player.PlayOrigin.DeviceIdentifier = req.SentByDeviceId
@@ -777,7 +804,7 @@ func (p *AppPlayer) handleApiRequest(req ApiRequest) (any, error) {
 						return
 					}
 
-					p.state.setActive(true)
+					p.state.takeOver()
 					p.state.setPaused(data.Paused)
 					p.state.player.Suppressions = &connectpb.Suppressions{}
 					p.state.player.PlayOrigin = &connectpb.PlayOrigin{
@@ -815,18 +842,7 @@ func (p *AppPlayer) handleApiRequest(req ApiRequest) (any, error) {
 			Value: p.apiVolume(),
 		}, nil
 	case ApiRequestTypeSetVolume:
-		data := req.Data.(ApiSetVolume)
-
-		var volume int32
-		if data.Relative {
-			volume = int32(p.apiVolume())
-			volume += data.Volume
-			volume = max(min(volume, int32(p.app.cfg.VolumeSteps)), 0)
-		} else {
-			volume = data.Volume
-		}
-
-		p.updateVolume(uint32(volume) * player.MaxStateVolume / p.app.cfg.VolumeSteps)
+		p.updateVolume(p.app.volumeFromApi(req.Data.(ApiSetVolume), p.state.device.Volume))
 		return nil, nil
 	case ApiRequestTypeSetRepeatingContext:
 		val := req.Data.(bool)
@@ -855,6 +871,127 @@ func (p *AppPlayer) handleApiRequest(req ApiRequest) (any, error) {
 			}
 
 			reply.done(&ApiToken{Token: accessToken}, nil)
+		})
+
+		return nil, errReplyDeferred
+	case ApiRequestTypeLibraryPlaylists:
+		// Like the token, the rootlist touches no player state, so the loop
+		// does not wait on the playlist service for it.
+		data := req.Data.(ApiRequestDataLibraryPage)
+		reply := apiReply(req)
+		spc, username := p.sess.Spclient(), p.sess.Username()
+		p.goDetached(libraryPlaylistsTimeout, func(ctx context.Context) {
+			playlists, err := fetchLibraryPlaylists(ctx, spc, username)
+			if err != nil {
+				reply.done(nil, fmt.Errorf("failed fetching rootlist: %w", err))
+				return
+			}
+
+			reply.done(pageLibraryPlaylists(playlists, data.Offset, data.Limit), nil)
+		})
+
+		return nil, errReplyDeferred
+	case ApiRequestTypeLibraryAlbums, ApiRequestTypeLibraryArtists:
+		data := req.Data.(ApiRequestDataLibraryPage)
+		reply := apiReply(req)
+		spc, username, imageUrl := p.sess.Spclient(), p.sess.Username(), p.imageUrlFunc()
+		p.goDetached(libraryPlaylistsTimeout, func(ctx context.Context) {
+			if req.Type == ApiRequestTypeLibraryAlbums {
+				albums, err := fetchLibraryAlbums(ctx, spc, username, imageUrl, data.Offset, data.Limit)
+				if err != nil {
+					reply.done(nil, fmt.Errorf("failed listing saved albums: %w", err))
+					return
+				}
+				reply.done(albums, nil)
+				return
+			}
+
+			artists, err := fetchLibraryArtists(ctx, spc, username, imageUrl, data.Offset, data.Limit)
+			if err != nil {
+				reply.done(nil, fmt.Errorf("failed listing followed artists: %w", err))
+				return
+			}
+			reply.done(artists, nil)
+		})
+
+		return nil, errReplyDeferred
+	case ApiRequestTypeSetLiked:
+		data := req.Data.(ApiSetLiked)
+		reply := apiReply(req)
+		spc, username := p.sess.Spclient(), p.sess.Username()
+		p.goDetached(libraryRequestTimeout, func(ctx context.Context) {
+			if err := spc.CollectionWrite(ctx, username, spclient.CollectionSetLikedSongs, data.Uris, !data.Liked); err != nil {
+				reply.done(nil, libraryError("failed writing liked songs", err))
+				return
+			}
+
+			for _, uri := range likedSongsContextUris(username) {
+				p.app.contextLists.invalidate(uri)
+			}
+			reply.done(nil, nil)
+		})
+
+		return nil, errReplyDeferred
+	case ApiRequestTypeGetLiked:
+		uris := req.Data.([]string)
+		reply := apiReply(req)
+		spc, username := p.sess.Spclient(), p.sess.Username()
+		p.goDetached(libraryRequestTimeout, func(ctx context.Context) {
+			contains := func(ctx context.Context, uris []string) ([]bool, error) {
+				return spc.CollectionContains(ctx, username, spclient.CollectionSetLikedSongs, uris)
+			}
+			states, err := likedStates(ctx, contains, uris)
+			if err != nil {
+				reply.done(nil, libraryError("failed reading liked songs", err))
+				return
+			}
+
+			reply.done(&ApiLikedStates{Items: states}, nil)
+		})
+
+		return nil, errReplyDeferred
+	case ApiRequestTypePlaylistRemoveTrack:
+		data := req.Data.(ApiPlaylistRemoveTrack)
+		reply := apiReply(req)
+		spc, username := p.sess.Spclient(), p.sess.Username()
+		p.goDetached(libraryRequestTimeout, func(ctx context.Context) {
+			if err := removeFromPlaylist(ctx, spc, username, data.PlaylistUri, data.Uri, data.Position); err != nil {
+				reply.done(nil, libraryError("failed removing from playlist", err))
+				return
+			}
+
+			p.app.contextLists.invalidate(data.PlaylistUri)
+			reply.done(nil, nil)
+		})
+
+		return nil, errReplyDeferred
+	case ApiRequestTypePlaylistContains:
+		data := req.Data.(ApiRequestDataPlaylistContains)
+		reply := apiReply(req)
+		spc := p.sess.Spclient()
+		p.goDetached(libraryRequestTimeout, func(ctx context.Context) {
+			states, err := playlistContains(ctx, spc, data.PlaylistUri, data.Uris)
+			if err != nil {
+				reply.done(nil, libraryError("failed reading playlist", err))
+				return
+			}
+
+			reply.done(&ApiPlaylistContains{Items: states}, nil)
+		})
+
+		return nil, errReplyDeferred
+	case ApiRequestTypePlaylistAddTracks:
+		data := req.Data.(ApiPlaylistAddTracks)
+		reply := apiReply(req)
+		spc, username := p.sess.Spclient(), p.sess.Username()
+		p.goDetached(libraryRequestTimeout, func(ctx context.Context) {
+			if err := appendToPlaylist(ctx, spc, username, data.PlaylistUri, data.Uris); err != nil {
+				reply.done(nil, libraryError("failed appending to playlist", err))
+				return
+			}
+
+			p.app.contextLists.invalidate(data.PlaylistUri)
+			reply.done(nil, nil)
 		})
 
 		return nil, errReplyDeferred

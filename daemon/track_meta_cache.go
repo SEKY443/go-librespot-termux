@@ -19,9 +19,22 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 )
 
-// trackMetaCacheLimit bounds the in-memory metadata cache. Entries are a few
-// KB each (a metadata proto), so the cap keeps the cache under ~10MB.
+// trackMetaCacheLimit is the least capacity of the in-memory metadata cache.
+// Entries are a few KB each (a metadata proto), so it keeps the cache under
+// ~10MB unless metadata.max_tracks asks for more.
 const trackMetaCacheLimit = 1000
+
+// trackMetaCacheHeadroom is kept on top of metadata.max_tracks for the moving
+// playback window of other contexts.
+const trackMetaCacheHeadroom = 200
+
+// trackMetaCacheCapacity sizes the cache so that a fully swept context of
+// maxTracks tracks fits. A smaller cache evicts the start of a context while
+// sweeping its end, so cached never reaches length, and a client polling for
+// that restarts the sweep over and over.
+func trackMetaCacheCapacity(maxTracks int) int {
+	return max(trackMetaCacheLimit, maxTracks+trackMetaCacheHeadroom)
+}
 
 // trackMetaCache is a bounded in-memory cache of track metadata keyed by URI.
 // It is fed by loaded and prefetched streams and by background batch fetches
@@ -34,8 +47,8 @@ type trackMetaCache struct {
 	lru *lru.Cache[string, *librespot.Media]
 }
 
-func newTrackMetaCache() *trackMetaCache {
-	l, _ := lru.New[string, *librespot.Media](trackMetaCacheLimit)
+func newTrackMetaCache(capacity int) *trackMetaCache {
+	l, _ := lru.New[string, *librespot.Media](capacity)
 	return &trackMetaCache{lru: l}
 }
 
@@ -114,15 +127,18 @@ type contextListCache struct {
 	// now is the clock the TTL is checked against; replaced by tests.
 	now func() time.Time
 
-	// inFlight is the set of uris being enumerated right now, so that a client
-	// polling every second does not spawn an enumeration per poll.
+	// inFlight maps the uris being enumerated right now to the generation
+	// they started at, so that a client polling every second does not spawn
+	// an enumeration per poll, and an invalidation during an enumeration can
+	// tell put to drop its possibly pre-change result. Changes to the LRU go
+	// through mu too, so a put and an invalidation cannot interleave.
 	mu       sync.Mutex
-	inFlight map[string]bool
+	inFlight map[string]uint64
 }
 
 func newContextListCache() *contextListCache {
 	l, _ := lru.New[string, contextListEntry](contextListCacheLimit)
-	return &contextListCache{lru: l, now: time.Now, inFlight: map[string]bool{}}
+	return &contextListCache{lru: l, now: time.Now, inFlight: map[string]uint64{}}
 }
 
 func (c *contextListCache) get(uri string) ([]string, bool) {
@@ -137,28 +153,54 @@ func (c *contextListCache) get(uri string) ([]string, bool) {
 	return e.uris, true
 }
 
-func (c *contextListCache) put(uri string, uris []string) {
+// put caches the listing an enumeration begun at gen produced, unless the
+// context was invalidated since: the listing may then predate the change.
+func (c *contextListCache) put(uri string, uris []string, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if started, ok := c.inFlight[uri]; ok && started != gen {
+		return
+	}
 	c.lru.Add(uri, contextListEntry{uris: uris, fetched: c.now()})
 }
 
-// beginFetch claims the right to enumerate uri, reporting false when the
-// listing is already cached or another goroutine is already enumerating it.
-func (c *contextListCache) beginFetch(uri string) bool {
+// invalidate drops the listing of uri after it was changed through the
+// daemon, so the next request enumerates it again instead of serving the
+// old listing for the rest of contextListTTL.
+func (c *contextListCache) invalidate(uri string) {
 	if c == nil {
-		return false
-	}
-	if _, ok := c.get(uri); ok {
-		return false
+		return
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.inFlight[uri] {
-		return false
+	c.lru.Remove(uri)
+	if gen, ok := c.inFlight[uri]; ok {
+		c.inFlight[uri] = gen + 1
 	}
-	c.inFlight[uri] = true
-	return true
+}
+
+// beginFetch claims the right to enumerate uri and returns the generation to
+// hand to put, reporting false when the listing is already cached or another
+// goroutine is already enumerating it.
+func (c *contextListCache) beginFetch(uri string) (gen uint64, ok bool) {
+	if c == nil {
+		return 0, false
+	}
+	if _, ok := c.get(uri); ok {
+		return 0, false
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, ok := c.inFlight[uri]; ok {
+		return 0, false
+	}
+	c.inFlight[uri] = 0
+	return 0, true
 }
 
 func (c *contextListCache) endFetch(uri string) {
@@ -525,7 +567,8 @@ func (p *AppPlayer) scheduleContextEnumerate(contextUri string) {
 		p.scheduleMetaSweep(uris, contextUri)
 		return
 	}
-	if !p.app.contextLists.beginFetch(contextUri) {
+	gen, ok := p.app.contextLists.beginFetch(contextUri)
+	if !ok {
 		return
 	}
 
@@ -548,7 +591,7 @@ func (p *AppPlayer) scheduleContextEnumerate(contextUri string) {
 			p.app.log.Debugf("context listing truncated to %d tracks: %s", len(uris), contextUri)
 		}
 
-		p.app.contextLists.put(contextUri, uris)
+		p.app.contextLists.put(contextUri, uris, gen)
 		p.scheduleMetaSweep(uris, contextUri)
 	})
 }
@@ -560,8 +603,13 @@ const defaultMetaMaxTracks = 800
 
 // metaMaxTracks returns the configured enumeration/sweep cap.
 func (p *AppPlayer) metaMaxTracks() int {
-	if n := p.app.cfg.Metadata.MaxTracks; n > 0 {
-		return n
+	return effectiveMetaMaxTracks(p.app.cfg.Metadata.MaxTracks)
+}
+
+// effectiveMetaMaxTracks applies the default to a configured metadata.max_tracks.
+func effectiveMetaMaxTracks(configured int) int {
+	if configured > 0 {
+		return configured
 	}
 	return defaultMetaMaxTracks
 }
